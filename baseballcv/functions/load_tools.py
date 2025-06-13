@@ -10,7 +10,7 @@ import shutil
 from huggingface_hub import snapshot_download, hf_hub_download
 from baseballcv.utilities import BaseballCVLogger, ProgressBar
 from datasets import load_dataset
-import polars as pl
+import textwrap
 
 class LoadTools:
     """
@@ -209,7 +209,8 @@ class LoadTools:
         
         if not model_txt_path:
             self.logger.error(f"No txt file found from model_alias={model_alias} and model_type={model_type}")
-            self.logger.error(f"""Here are some valid aliases for each model type if you're using the API:
+            self.logger.error(textwrap.dedent(f"""
+            Here are some valid aliases for each model type if you're using the API:
             YOLO: {', '.join(self.yolo_model_aliases.keys())}
 
             FLORENCE2: {', '.join(self.florence_model_aliases.keys())}
@@ -218,8 +219,9 @@ class LoadTools:
 
             DETR: {', '.join(self.detr_model_aliases.keys())}
 
-            RFDETR: {', '.join(self.rfdetr_model_aliases.keys())}""")
-            raise ValueError(f"No txt file found from model_alias={model_alias} and model_type={model_type}")
+            RFDETR: {', '.join(self.rfdetr_model_aliases.keys())}
+            """))
+            return
 
         if output_dir:
             base_dir = output_dir
@@ -279,9 +281,11 @@ class LoadTools:
         
         txt_path = self.dataset_aliases.get(dataset_alias) if use_bdl_api else file_txt_path
         if not txt_path:
-            self.logger.error(f"""Invalid alias {dataset_alias}. These are the valid dataset aliases:
-            {', '.join(self.dataset_aliases.keys())}""")
-            raise ValueError()
+            self.logger.error(textwrap.dedent(f"""
+            Invalid alias {dataset_alias}. These are the valid dataset aliases:
+            {', '.join(self.dataset_aliases.keys())}
+            """))
+            return
         
         is_hf_dataset = txt_path.startswith("hf:") 
         is_numerical_dataset = txt_path.endswith(".zip")

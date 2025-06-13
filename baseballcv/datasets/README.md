@@ -39,6 +39,53 @@ from baseballcv.datasets import JSONLDetectionDataset
 dataset = JSONLDetectionDataset(jsonl_file_path="annotations.jsonl", image_directory_path="images/", augment=True)
 ```
 
+## Dataset Translator
+The `DatasetTranslator` is a wrapper for roboflow's `DetectionDataset` class which extracts the images and annotations from your input directories and converts it to the desired dataset class. To reduce errors with running this function, we are making assumptions on the file directories you are using. If you're directory is not in line with what we expect, it can lead to errors or undesirable results. Please take a look at the expected structure below to make sure your input directories are supported by our translator. 
+
+Expected input for YOLO:
+```
+Root/
+| data.yaml (optional)
+├── train/
+|   ├── images/
+|   ├── labels/
+├── test/ (optional)
+|   ├── images/
+|   ├── labels/
+├── val/ (optional)
+|   ├── images/
+|   ├── labels/
+```
+
+Expected input for COCO:
+```
+Root/
+├── train/
+|   ├── images/
+|   ├── labels/
+├── test/ (optional)
+|   ├── images/
+|   ├── labels/
+├── val/ (optional)
+|   ├── images/
+|   ├── labels/
+├── annotations/
+|   ├── instances_train.json (test and val are required if directories exist)
+```
+
+Expected input for Pascal Voc:
+```
+Root/
+├── train/
+|   ├── images/
+|   ├── labels/
+├── test/ (optional)
+|   ├── images/
+|   ├── labels/
+├── val/ (optional)
+|   ├── images/
+|   ├── labels/
+```
 
 #### Features
 - JSONL format support
