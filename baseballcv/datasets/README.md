@@ -73,18 +73,22 @@ Root/
 |   ├── instances_train.json (test and val are required if directories exist)
 ```
 
-Expected input for Pascal Voc:
+Expected input for Pascal Voc (.xml files + images should be in these folders):
 ```
 Root/
 ├── train/
-|   ├── images/
-|   ├── labels/
 ├── test/ (optional)
-|   ├── images/
-|   ├── labels/
 ├── val/ (optional)
-|   ├── images/
-|   ├── labels/
+```
+
+Expected input for JSONL:
+```
+Root/
+├── dataset/
+|   ├── *_train.jsonl
+|   ├── *_test.jsonl (optional)
+|   ├── *_val.jsonl (optional)
+|   ├── images.jpg (rest of images)
 ```
 
 #### Features

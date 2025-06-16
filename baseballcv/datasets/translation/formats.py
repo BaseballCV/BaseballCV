@@ -1,18 +1,23 @@
-from supervision import DetectionDataset
+from supervision import DetectionDataset, Detections
+from supervision.detection.utils import polygon_to_mask
 import os
-import shutil
+import cv2
+import numpy as np
+import numpy.typing as npt
 import random
-from typing import Tuple, List, Optional
+import json
+import re
+from typing import Tuple, List, Optional, Dict, Union
 import math # For floating point rounding issues
 from baseballcv.utilities import BaseballCVLogger
 import glob
 
 class _BaseFmt:
-
-# TODO: Might need to add functionality for the json data?
+    
     def __init__(self, params):
         self.params = params
         self.logger = BaseballCVLogger.get_logger(self.__class__.__name__)
+        self.classes = self.params.classes
 
         dir_list = os.listdir(self.params.root_dir)
 
@@ -21,6 +26,7 @@ class _BaseFmt:
         test_dir = self._find_respective_file(dir_list, 'test')
         val_dir = self._find_respective_file(dir_list, 'val')
         annotations_dir = self._find_respective_file(dir_list, 'annotation')
+        dataset_dir = self._find_respective_file(dir_list, 'dataset')
 
         if train_dir is None:
             raise FileNotFoundError('There needs to at least be a `train` folder')
@@ -30,6 +36,7 @@ class _BaseFmt:
             "test_dir": test_dir,
             "val_dir": val_dir,
             "annotations_dir": annotations_dir,
+            "dataset_dir": dataset_dir
         }
 
         for attr_name, dir_name in dir_attrs.items():
@@ -89,42 +96,19 @@ class _BaseFmt:
             val_det.as_pascal_voc(images_directory_path=os.path.join(self.new_dir, 'val', 'images'), 
                           annotations_directory_path=os.path.join(self.new_dir, 'val', 'labels'))
 
+    def to_jsonl(self, detections_data: Tuple):
+        train_det, test_det, val_det = detections_data
 
-    def move_to_new_folder(self, original_dir, new_dir, *, random_state=None, shuffle=True, stratify: str=None):
-        if self.params.train_test_val_split and not self._validate_all_splits():
-            try:
-                train_items = os.listdir(f"{self.train_dir}/images")
-                # For now, move the images, will need to figure out how to move annotations
-                train, test, val = self._train_test_val_split(data=train_items, split=self.params.train_test_val_split, 
-                                                              random_state=random_state, 
-                                                              shuffle=shuffle, 
-                                                              stratify=stratify)
+        class_labels = train_det.classes # Will be used to stratify training splits
 
-                new_subdirs = {
-                    os.path.basename(self.train_dir): train,
-                    'test': test,
-                    'val': val
-                }
-                
-                # May need to make this bit faster
-                for subdir_name, file_list in new_subdirs.items():
-                    target = os.path.join(self.new_dir, subdir_name, 'images')
-                    os.makedirs(target, exist_ok=True)
-
-                    for pth in file_list:
-                        shutil.copy(os.path.join(f"{self.train_dir}/images", pth), target)
-                
-                self.logger.info(f"Directory Copied over to {self.new_dir}")
-
-            except Exception as e:
-                self.logger.exception(f"Issue with splitting the train folder. Please check to make sure the folder contains a `images` + `labels` subdirectory. {e}")
+        train_det.as_jsonl(images_directory_path=os.path.join(self.new_dir, 'train'), 
+                          annotations_directory_path=os.path.join(self.new_dir, 'annotations', 'annotations_train.jsonl'))
         
-        else:
-            # Copy over all files to the conversion folder
-            # TODO: Check to see if this is efficient
-            shutil.copytree(self.params.root_dir, self.new_dir, dirs_exist_ok=True)
-            self.logger.info(f"Directory Copied over to {self.new_dir}")
-
+        if test_det and val_det:
+            test_det.as_jsonl(images_directory_path=os.path.join(self.new_dir, 'test'), 
+                          annotations_directory_path=os.path.join(self.new_dir, 'annotations', 'annotations_test.jsonl'))
+            val_det.as_jsonl(images_directory_path=os.path.join(self.new_dir, 'val'), 
+                          annotations_directory_path=os.path.join(self.new_dir, 'annotations', 'annotations_val.jsonl'))
 
     def _find_respective_file(self, dir_list: List[str], query: str) -> Optional[str]:
         for item in dir_list:
@@ -182,8 +166,6 @@ class _BaseFmt:
         """
  
         return all([hasattr(self, 'train_dir'), hasattr(self, 'test_dir'), hasattr(self, 'val_dir')])
-        
-
 class YOLOFmt(_BaseFmt):
     @property
     def detections_data(self):
@@ -218,32 +200,31 @@ class YOLOFmt(_BaseFmt):
     def to_pascal(self):
         super().to_pascal(detections_data=self.detections_data)
         
-
 class COCOFmt(_BaseFmt):
-    # Requires self.annotations_file so if not exists, raise valueerror
+    # Requires self.annotations_dir so if not exists, raise valueerror
     @property
     def detections_data(self):
         # TODO: Need to check for other json file names
-        if not hasattr(self, 'annotations_file'):
-            self.logger.error('There needs to at least be an annotation file')
+        if not hasattr(self, 'annotations_dir'):
+            self.logger.error('There needs to be an annotations directory containing the .json files')
             return (None, None, None)
 
         train_detections = DetectionDataset.from_coco(
             images_directory_path=os.path.join(self.params.root_dir, self.train_dir, 'images'),
-            annotations_path=os.path.join(self.params.root_dir, self.annotations_file, 'instances_train.json'),
+            annotations_path=os.path.join(self.params.root_dir, self.annotations_dir, 'instances_train.json'),
             force_masks=self.params.force_masks
             )
 
         if self._validate_all_splits():
             test_detections = DetectionDataset.from_coco(
                 images_directory_path=os.path.join(self.params.root_dir, self.test_dir, 'images'),
-                annotations_path=os.path.join(self.params.root_dir, self.annotations_file, 'instances_test.json'),
+                annotations_path=os.path.join(self.params.root_dir, self.annotations_dir, 'instances_test.json'),
                 force_masks=self.params.force_masks
                 )
 
             val_detections = DetectionDataset.from_coco(
                 images_directory_path=os.path.join(self.params.root_dir, self.val_dir, 'images'),
-                annotations_path=os.path.join(self.params.root_dir, self.annotations_file, 'instances_val.json'),
+                annotations_path=os.path.join(self.params.root_dir, self.annotations_dir, 'instances_val.json'),
                 force_masks=self.params.force_masks
                 )
         return (train_detections, test_detections, val_detections)
@@ -253,30 +234,27 @@ class COCOFmt(_BaseFmt):
 
     def to_pascal(self):
         super().to_pascal(detections_data=self.detections_data)
-        
+
 class PascalFmt(_BaseFmt):
     @property
     def detections_data(self):
-        if not hasattr(self, 'annotations_file'):
-            self.logger.error('There needs to at least be an annotation file')
-            return (None, None, None)
 
         train_detections = DetectionDataset.from_pascal_voc(
-            images_directory_path=os.path.join(self.params.root_dir, self.train_dir, 'images'),
-            annotations_path=os.path.join(self.params.root_dir, self.train_dir, 'labels'),
+            images_directory_path=os.path.join(self.params.root_dir, self.train_dir),
+            annotations_path=os.path.join(self.params.root_dir, self.train_dir),
             force_masks=self.params.force_masks
             )
 
         if self._validate_all_splits():
             test_detections = DetectionDataset.from_pascal_voc(
-                images_directory_path=os.path.join(self.params.root_dir, self.test_dir, 'images'),
-                annotations_path=os.path.join(self.params.root_dir, self.test_dir, 'labels'),
+                images_directory_path=os.path.join(self.params.root_dir, self.test_dir),
+                annotations_path=os.path.join(self.params.root_dir, self.test_dir),
                 force_masks=self.params.force_masks
                 )
 
             val_detections = DetectionDataset.from_pascal_voc(
-                images_directory_path=os.path.join(self.params.root_dir, self.val_dir, 'images'),
-                annotations_path=os.path.join(self.params.root_dir, self.val_dir, 'labels'),
+                images_directory_path=os.path.join(self.params.root_dir, self.val_dir),
+                annotations_path=os.path.join(self.params.root_dir, self.val_dir),
                 force_masks=self.params.force_masks
                 )
         return (train_detections, test_detections, val_detections)
@@ -286,3 +264,133 @@ class PascalFmt(_BaseFmt):
     
     def to_coco(self):
         super().to_coco(detections_data=self.detections_data)
+
+
+class JsonLFmt(_BaseFmt):
+    
+    @property
+    def detections_data(self):
+        # TODO: Need to check for other json file names
+        if not hasattr(self, 'dataset_dir'):
+            self.logger.error('There needs to be a dataset directory containing the jsonl and image files')
+            return (None, None, None)
+
+        train_detections = JsonLFmt.from_jsonl(
+            images_directory_path=os.path.join(self.params.root_dir, self.train_dir, 'images'),
+            annotations_path=os.path.join(self.params.root_dir, self.annotations_dir, 'instances_train.jsonl'),
+            force_masks=self.params.force_masks
+            )
+
+        if self._validate_all_splits():
+            test_detections = JsonLFmt.from_jsonl(
+                images_directory_path=os.path.join(self.params.root_dir, self.test_dir, 'images'),
+                annotations_path=os.path.join(self.params.root_dir, self.annotations_dir, 'instances_test.jsonl'),
+                force_masks=self.params.force_masks
+                )
+
+            val_detections = JsonLFmt.from_jsonl(
+                images_directory_path=os.path.join(self.params.root_dir, self.val_dir, 'images'),
+                annotations_path=os.path.join(self.params.root_dir, self.annotations_dir, 'instances_val.jsonl'),
+                force_masks=self.params.force_masks
+                )
+        return (train_detections, test_detections, val_detections)
+    
+    @classmethod
+    def from_jsonl(cls, images_directory_path, annotations_path, force_masks) -> DetectionDataset:
+        jsonl_data = cls.read_jsonl(path=annotations_path)
+
+        # This might not be right
+        classes = list(cls.classes.values())
+
+        images = []
+        annotations = {}
+
+        for jsonl_image in jsonl_data:
+            # Extract name, width, height from the name + suffix
+            image_name = jsonl_image['image']
+
+            image_path = os.path.join(images_directory_path, image_name)
+
+            (image_width, image_height, _) = cv2.imread(image_path).shape
+
+            annotation = cls.jsonl_to_detections(
+                image_annotations=jsonl_image['suffix'],
+                resolution_wh=(image_width, image_height),
+                with_masks=force_masks
+            )
+
+            images.append(image_path)
+            annotations[image_path] = annotation
+
+        return DetectionDataset(classes=classes, images=images, annotations=annotations)
+
+    def jsonl_to_detections(self, image_annotations: List[dict], 
+                            resolution_wh: Tuple[int, int], with_masks: bool) -> Detections:
+        if not image_annotations:
+            return Detections.empty()
+
+        locations = image_annotations.split(';')
+        class_ids = []
+        yxyx = []
+        relative_polygons = []
+
+        for location in locations:
+            location_bounds = re.findall(r'loc<\d{4}>', location)
+            class_id = int(location.strip().split()[-1])
+
+            class_ids.append(class_id)
+            yxyx.append(location_bounds)
+
+        yxyx = np.array(list(map(int, yxyx)))
+
+        if yxyx:
+            yxyx = yxyx / np.array([resolution_wh[1], resolution_wh[0], resolution_wh[1], resolution_wh[0]])
+            yxyx = yxyx * 1024
+            xyxy = yxyx[[1, 0, 3, 2]]
+
+            for box in xyxy:
+                relative_polygons.appen(np.array(
+                    [[box[0], box[1]], [box[2], box[1]], [box[2], box[3]], [box[0], box[3]]]
+                ))
+
+        if with_masks:
+            polygons = [
+                    (polygon * np.array(resolution_wh)).astype(int) for polygon in relative_polygons
+                ]
+            mask = self.jsonl_to_mask(
+                polygons=polygons, resolution_wh=resolution_wh
+            )
+
+            return Detections(xyxy=xyxy, class_id=np.asarray(class_ids, dtype=int), mask=mask)
+
+        return Detections(xyxy=xyxy, class_id=np.asarray(class_ids, dtype=int))
+    
+    def jsonl_to_mask(self, polygons: List[np.ndarray], resolution_wh: Tuple[int, int]
+                      ) -> npt.NDArray[np.bool_]:
+        return np.array(
+        [
+            polygon_to_mask(polygon=polygon, resolution_wh=resolution_wh)
+            for polygon in polygons
+        ],
+        dtype=bool,
+    )
+
+    def read_jsonl(self, path: str) -> List[dict]:
+        data = []
+        with open(str(path), 'r') as f:
+            json_lines = list(f)
+
+        for json_line in json_lines:
+            result = json.loads(json_line)
+            data.append(result)
+        
+        return data
+
+    def to_coco(self, detections_data):
+        return super().to_coco(detections_data)
+    
+    def to_pascal(self, detections_data):
+        return super().to_pascal(detections_data)
+    
+    def to_yolo(self, detections_data):
+        return super().to_yolo(detections_data)

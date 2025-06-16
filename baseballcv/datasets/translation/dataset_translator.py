@@ -1,18 +1,20 @@
 from typing import Dict, Tuple, Union
-from .formats import YOLOFmt, COCOFmt, PascalFmt
+from .formats import YOLOFmt, COCOFmt, PascalFmt, JsonLFmt
 from dataclasses import dataclass
 import shutil
 
 TRANSLATOR = {
     'yolo': YOLOFmt,
     'pascal': PascalFmt,
-    'coco': COCOFmt
+    'coco': COCOFmt,
+    'jsonl': JsonLFmt
 
 }
 
 @dataclass
 class ConversionParams:
     root_dir: str
+    classes: Dict[int, str] # Required arg for the input classnames
     train_test_val_split: Tuple[float, float, float] = () # optional param if the train, test, val split is not established
     train_test_val_args: Dict[str, Union[str, bool, int]] = None # optional param to specify the train, test, val split.
     force_masks: bool = False
@@ -39,7 +41,7 @@ class DatasetTranslator:
         self._convert_fn()
 
     @classmethod
-    def delete_dir(self, dir_name: str) -> None:
+    def delete_dir(cls, dir_name: str) -> None:
         shutil.rmtree(dir_name)
 
     def rename(self):
