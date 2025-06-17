@@ -14,7 +14,6 @@ TRANSLATOR = {
 @dataclass
 class ConversionParams:
     root_dir: str
-    classes: Dict[int, str] # Required arg for the input classnames
     train_test_val_split: Tuple[float, float, float] = () # optional param if the train, test, val split is not established
     train_test_val_args: Dict[str, Union[str, bool, int]] = None # optional param to specify the train, test, val split.
     force_masks: bool = False

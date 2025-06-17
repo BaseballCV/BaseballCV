@@ -1,5 +1,6 @@
 from supervision import DetectionDataset, Detections
 from supervision.detection.utils import polygon_to_mask
+from supervision.dataset.utils import approximate_mask_with_polygons
 import os
 import cv2
 import numpy as np
@@ -12,12 +13,125 @@ import math # For floating point rounding issues
 from baseballcv.utilities import BaseballCVLogger
 import glob
 
+def jsonl_to_detections(image_annotations: str, 
+                        resolution_wh: Tuple[int, int], with_masks: bool,
+                        classes: Dict[str, int]) -> Detections:
+        
+        if not image_annotations:
+            return Detections.empty()
+        
+        w, h = resolution_wh
+
+        if w <= 0 and h <=0:
+            raise ValueError(f'Both dimensions must be positive. Got width {w} and height {h}')
+
+        pattern = re.compile(r"(?<!<loc\d{4}>)<loc(\d{4})><loc(\d{4})><loc(\d{4})><loc(\d{4})> ([\w\s\-]+)")
+        matches = pattern.findall(image_annotations)
+
+        matches = np.array(matches) if matches else np.empty((0, 5))
+
+        xyxy, class_name = matches[:, [1, 0, 3, 2]], matches[:, 4]
+        xyxy = xyxy.astype(int) / 1024 * np.array([w, h, w, h])
+        class_name = np.char.strip(class_name.astype(str))
+
+        filter = np.array([name in classes for name in class_name], dtype=bool)
+        xyxy = xyxy[filter]
+        class_name = class_name[filter]
+        class_id = np.array([classes.get(name) for name in class_name])
+
+        relative_polygons = [np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]]) for (x1, y1, x2, y2) in xyxy]
+
+        if with_masks:
+            polygons = [
+                    (polygon * np.array(resolution_wh)).astype(int) for polygon in relative_polygons
+                ]
+            mask = np.array(
+                [
+                    polygon_to_mask(polygon=polygon, resolution_wh=resolution_wh)
+                    for polygon in polygons
+                ],
+                dtype=bool,
+            )
+            
+            if not np.any(mask):
+                # This is some weird bug that's caused by the whol array being False. Need to figure out why.
+                return Detections.empty()
+
+            return Detections(xyxy=xyxy, class_id=class_id, mask=mask)
+
+        return Detections(xyxy=xyxy, class_id=class_id)
+
+def read_jsonl(path: str) -> List[dict]:
+        data = []
+        with open(str(path), 'r') as f:
+            json_lines = list(f)
+
+        for json_line in json_lines:
+            result = json.loads(json_line)
+            data.append(result)
+        
+        return data
+
+class NewDetectionsDataset(DetectionDataset):
+    """
+    A Monkey Patch Class of Roboflow's `DetectionDataset` with a JSONL implementation in place
+    """
+
+    def __init__(self, classes, images, annotations):
+        super().__init__(classes, images, annotations)
+
+    @classmethod
+    def from_jsonl(cls, images_directory_path: str, annotations_path: str, force_masks: bool) -> DetectionDataset:
+        jsonl_data = read_jsonl(path=annotations_path)
+
+        images = []
+        annotations = {}
+
+        # assume prefix is the same throughout JSONL
+        classes_dict = None
+        assigned_class = False
+
+        for jsonl_image in jsonl_data:
+            # Extract name, width, height from the name + suffix
+            image_name = jsonl_image['image']
+
+            image_path = os.path.join(images_directory_path, image_name)
+
+            (image_width, image_height, _) = cv2.imread(image_path).shape
+
+            pattern = re.compile(r'\b(?!detect\b)(\w+)')
+
+            classes = pattern.findall(jsonl_image['prefix'])
+
+            if assigned_class == False:
+                classes_dict = {name: identifyer for identifyer, name in enumerate(classes)}
+                assigned_class = True
+
+
+            annotation = jsonl_to_detections(
+                image_annotations=jsonl_image['suffix'],
+                resolution_wh=(image_width, image_height),
+                with_masks=force_masks,
+                classes=classes_dict
+            )
+
+            if annotation.is_empty() and force_masks:
+                continue
+            
+            images.append(image_path)
+            annotations[image_path] = annotation
+
+        return DetectionDataset(classes=classes, images=images, annotations=annotations)
+    
+    def as_jsonl(self):
+        pass
+
+    
 class _BaseFmt:
 
     def __init__(self, params):
         self.params = params
         self.logger = BaseballCVLogger.get_logger(self.__class__.__name__)
-        self.classes = self.params.classes
 
         dir_list = os.listdir(self.params.root_dir)
 
@@ -180,20 +294,20 @@ class YOLOFmt(_BaseFmt):
         except IndexError:
             self.logger.error('Make sure you have a specified yaml file in your directory.')
 
-        train_detections = DetectionDataset.from_yolo(
+        train_detections = NewDetectionsDataset.from_yolo(
             images_directory_path=os.path.join(self.train_dir, 'images'),
             annotations_directory_path=os.path.join(self.train_dir, 'labels'),
             data_yaml_path=yaml_pth, force_masks=self.params.force_masks, is_obb=self.params.is_obb
             )
 
         if self._validate_all_splits():
-            test_detections = DetectionDataset.from_yolo(
+            test_detections = NewDetectionsDataset.from_yolo(
                 images_directory_path=os.path.join(self.test_dir, 'images'),
                 annotations_directory_path=os.path.join(self.test_dir, 'labels'),
                 data_yaml_path=yaml_pth, force_masks=self.params.force_masks, is_obb=self.params.is_obb
                 )
 
-            val_detections = DetectionDataset.from_yolo(
+            val_detections = NewDetectionsDataset.from_yolo(
                 images_directory_path=os.path.join(self.val_dir, 'images'),
                 annotations_directory_path=os.path.join(self.val_dir, 'labels'),
                 data_yaml_path=yaml_pth, force_masks=self.params.force_masks, is_obb=self.params.is_obb
@@ -220,20 +334,20 @@ class COCOFmt(_BaseFmt):
             self.logger.error('There needs to be an annotations directory containing the .json files')
             return (train_detections, test_detections, val_detections )
 
-        train_detections = DetectionDataset.from_coco(
+        train_detections = NewDetectionsDataset.from_coco(
             images_directory_path=os.path.join(self.train_dir, 'images'),
             annotations_path=os.path.join(self.annotations_dir, 'instances_train.json'),
             force_masks=self.params.force_masks
             )
 
         if self._validate_all_splits():
-            test_detections = DetectionDataset.from_coco(
+            test_detections = NewDetectionsDataset.from_coco(
                 images_directory_path=os.path.join(self.test_dir, 'images'),
                 annotations_path=os.path.join(self.annotations_dir, 'instances_test.json'),
                 force_masks=self.params.force_masks
                 )
 
-            val_detections = DetectionDataset.from_coco(
+            val_detections = NewDetectionsDataset.from_coco(
                 images_directory_path=os.path.join(self.val_dir, 'images'),
                 annotations_path=os.path.join(self.annotations_dir, 'instances_val.json'),
                 force_masks=self.params.force_masks
@@ -255,20 +369,20 @@ class PascalFmt(_BaseFmt):
 
         train_detections, test_detections, val_detections = (None, None, None)
 
-        train_detections = DetectionDataset.from_pascal_voc(
+        train_detections = NewDetectionsDataset.from_pascal_voc(
             images_directory_path=self.train_dir,
             annotations_path=self.train_dir,
             force_masks=self.params.force_masks
             )
 
         if self._validate_all_splits():
-            test_detections = DetectionDataset.from_pascal_voc(
+            test_detections = NewDetectionsDataset.from_pascal_voc(
                 images_directory_path=self.test_dir,
                 annotations_path=self.test_dir,
                 force_masks=self.params.force_masks
                 )
 
-            val_detections = DetectionDataset.from_pascal_voc(
+            val_detections = NewDetectionsDataset.from_pascal_voc(
                 images_directory_path=self.val_dir,
                 annotations_path=self.val_dir,
                 force_masks=self.params.force_masks
@@ -297,118 +411,26 @@ class JsonLFmt(_BaseFmt):
             self.logger.error('There needs to be a dataset directory containing the jsonl and image files')
             return (train_detections, test_detections, val_detections)
 
-        class_names = list(self.params.classes.values())
-
-        train_detections = JsonLFmt.from_jsonl(
+        train_detections = NewDetectionsDataset.from_jsonl(
             images_directory_path=self.dataset_dir,
             annotations_path=os.path.join(self.dataset_dir, '_annotations.train.jsonl'),
-            force_masks=self.params.force_masks,
-            class_names=class_names
+            force_masks=self.params.force_masks
             )
 
         if self._validate_all_splits():
-            test_detections = JsonLFmt.from_jsonl(
+            test_detections = NewDetectionsDataset.from_jsonl(
                 images_directory_path=self.dataset_dir,
                 annotations_path=os.path.join(self.dataset_dir, 'instances_test.jsonl'),
-                force_masks=self.params.force_masks,
-                class_names=class_names
+                force_masks=self.params.force_masks
                 )
 
-            val_detections = JsonLFmt.from_jsonl(
+            val_detections = NewDetectionsDataset.from_jsonl(
                 images_directory_path=self.dataset_dir,
                 annotations_path=os.path.join(self.dataset_dir, 'instances_val.jsonl'),
-                force_masks=self.params.force_masks,
-                class_names=class_names
+                force_masks=self.params.force_masks
                 )
-        return (train_detections, test_detections, val_detections)
-    
-    @classmethod
-    def from_jsonl(cls, images_directory_path, annotations_path, force_masks, class_names: List[str]) -> DetectionDataset:
-        jsonl_data = cls.read_jsonl(path=annotations_path)
-
-        images = []
-        annotations = {}
-
-        for jsonl_image in jsonl_data:
-            # Extract name, width, height from the name + suffix
-            image_name = jsonl_image['image']
-
-            image_path = os.path.join(images_directory_path, image_name)
-
-            (image_width, image_height, _) = cv2.imread(image_path).shape
-
-            annotation = cls.jsonl_to_detections(
-                image_annotations=jsonl_image['suffix'],
-                resolution_wh=(image_width, image_height),
-                with_masks=force_masks
-            )
-
-            images.append(image_path)
-            annotations[image_path] = annotation
-
-        return DetectionDataset(classes=class_names, images=images, annotations=annotations)
-
-    @staticmethod
-    def jsonl_to_detections(image_annotations: List[dict], 
-                            resolution_wh: Tuple[int, int], with_masks: bool) -> Detections:
-        if not image_annotations:
-            return Detections.empty()
-
-        locations = image_annotations.split(';')
-        class_ids = []
-        yxyx = []
-        relative_polygons = []
-
-        for location in locations:
-            location_bounds = re.findall(r'<loc(\d{4})>', location)
-            class_id = int(location.strip().split()[-1])
-
-            class_ids.append(class_id)
-            yxyx.append(location_bounds)
-
-        yxyx = np.array(yxyx).astype(int)
-        xyxy = []
-
-        if len(yxyx) > 0:
-            for box in yxyx:
-                box = box / np.array([resolution_wh[1], resolution_wh[0], resolution_wh[1], resolution_wh[0]])
-                box = box * 1024
-                box = box[[1, 0, 3, 2]]
-
-                relative_polygons.append(np.array(
-                    [[box[0], box[1]], [box[2], box[1]], [box[2], box[3]], [box[0], box[3]]]
-                ))
-                xyxy.append(box)
-
-            return Detections(xyxy=np.array(xyxy), class_id=np.asarray(class_ids, dtype=int))
-
-        if with_masks:
-            polygons = [
-                    (polygon * np.array(resolution_wh)).astype(int) for polygon in relative_polygons
-                ]
-            mask = np.array(
-                [
-                    polygon_to_mask(polygon=polygon, resolution_wh=resolution_wh)
-                    for polygon in polygons
-                ],
-                dtype=bool,
-            )
-
-            return Detections(xyxy=np.array(xyxy), class_id=np.asarray(class_ids, dtype=int), mask=mask)
-
-        return Detections.empty()
-
-    @staticmethod
-    def read_jsonl(path: str) -> List[dict]:
-        data = []
-        with open(str(path), 'r') as f:
-            json_lines = list(f)
-
-        for json_line in json_lines:
-            result = json.loads(json_line)
-            data.append(result)
         
-        return data
+        return (train_detections, test_detections, val_detections)
 
     def to_coco(self):
         return super().to_coco(detections_data=self.detections_data)
