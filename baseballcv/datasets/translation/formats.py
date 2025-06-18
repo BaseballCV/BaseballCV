@@ -1,7 +1,8 @@
 from supervision import DetectionDataset, Detections
 from supervision.detection.utils import polygon_to_mask
-from supervision.dataset.utils import approximate_mask_with_polygons
+from supervision.dataset.utils import save_dataset_images
 import os
+from pathlib import Path
 import cv2
 import numpy as np
 import numpy.typing as npt
@@ -12,6 +13,11 @@ from typing import Tuple, List, Optional, Dict, Union
 import math # For floating point rounding issues
 from baseballcv.utilities import BaseballCVLogger
 import glob
+
+# What's left to do:
+# 1. Implement functionality to save jsonl files
+# 2. Implement Train, test, val, split functionality
+# 3. Fix dumb bug for the masking
 
 def jsonl_to_detections(image_annotations: str, 
                         resolution_wh: Tuple[int, int], with_masks: bool,
@@ -72,6 +78,16 @@ def read_jsonl(path: str) -> List[dict]:
         
         return data
 
+def detections_to_jsonl_annotations(
+        detections: Detections, image_shape: Tuple[int, int],
+        image_name: str, min_image_area_percentage: float, max_image_area_percentage: float,
+        approximation_percentage: float
+        ):
+    pass
+
+def save_jsonl_file(lines: list, file_path: str) -> None:
+    pass
+
 class NewDetectionsDataset(DetectionDataset):
     """
     A Monkey Patch Class of Roboflow's `DetectionDataset` with a JSONL implementation in place
@@ -104,7 +120,7 @@ class NewDetectionsDataset(DetectionDataset):
             classes = pattern.findall(jsonl_image['prefix'])
 
             if assigned_class == False:
-                classes_dict = {name: identifyer for identifyer, name in enumerate(classes)}
+                classes_dict = {name: identifier for identifier, name in enumerate(classes)}
                 assigned_class = True
 
 
@@ -123,9 +139,39 @@ class NewDetectionsDataset(DetectionDataset):
 
         return DetectionDataset(classes=classes, images=images, annotations=annotations)
     
-    def as_jsonl(self):
-        pass
+    def as_jsonl(self: "NewDetectionsDataset",
+        images_directory_path: Optional[str] = None,
+        annotations_path: Optional[str] = None,
+        min_image_area_percentage: float = 0.0,
+        max_image_area_percentage: float = 1.0,
+        approximation_percentage: float = 0.0,
+    ) -> None:
+        if images_directory_path:
+            save_dataset_images(
+                dataset=self, 
+                images_directory_path=images_directory_path
+            )
+        
+        if annotations_path:
+            Path(annotations_path).mkdir(parents=True, exist_ok=True)
 
+            lines = []
+            for image_path, image, annotation in self:
+                image_name = Path(image_path).name
+
+                line = detections_to_jsonl_annotations(
+                    detections=annotation,
+                    image_shape = image.shape,
+                    image_name=image_name,
+                    min_image_area_percentage=min_image_area_percentage,
+                    max_image_area_percentage=max_image_area_percentage,
+                    approximation_percentage=approximation_percentage
+                )
+
+                lines.append(line)
+            
+            save_jsonl_file(lines=lines, file_path=annotations_path)
+            
     
 class _BaseFmt:
 
