@@ -1,2 +1,0 @@
-import segment_anything
-print(segment_anything.__version__)
