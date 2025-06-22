@@ -6,7 +6,9 @@ import shutil
 import os
 from typing import Dict, List, Optional # Added Optional
 import concurrent.futures
-from .utils import DistanceToZone, GloveTracker, CommandAnalyzer # Import CommandAnalyzer
+from .utils import DistanceToZone, GloveTracker, CommandAnalyzer, PitchMotionAnalyzer
+import cv2
+from baseballcv.model.od.yolo import YOLOModel
 from baseballcv.utilities import BaseballCVLogger
 from baseballcv.functions.savant_scraper import BaseballSavVideoScraper
 
@@ -491,3 +493,77 @@ class BaseballTools:
             self.logger.warning("Could not calculate aggregate command metrics.")
 
         return results_df
+    
+    def trim_pitcher_video(self, 
+                            video_path: str, 
+                            output_path: str, 
+                            pitcher_box: list = None,
+                            pitcher_detector_model: str = 'pitcher_hitter_catcher_detector',
+                            model_config: str = 'models/segmentation/sam2/sam2_hiera_t.yaml', 
+                            model_checkpoint: str = 'models/segmentation/sam2/sam2_hiera_tiny.pt',
+                            device: str = None,
+                            verbose: bool = False):
+        """
+        Analyzes a video to trim it to the pitcher's motion using SAM-2.
+        If pitcher_box is not provided, it will use an object detector to find the pitcher.
+
+        Args:
+            video_path (str): Path to the input video file.
+            output_path (str): Path to save the trimmed video file.
+            pitcher_box (list, optional): A bounding box [x1, y1, x2, y2] for the pitcher. Defaults to None.
+            pitcher_detector_model (str, optional): Model alias for the pitcher detector. Defaults to 'pitcher_hitter_catcher_detector'.
+            model_config (str, optional): Path to the SAM-2 model config file.
+            model_checkpoint (str, optional): Path to the SAM-2 model checkpoint file.
+            device (str, optional): Device to use for analysis (e.g., 'cpu', 'cuda').
+            verbose (bool, optional): Enable verbose logging.
+        """
+        self.logger.info(f"Initializing Pitch Motion Trimmer for video: {video_path}")
+
+        try:
+            if pitcher_box is None:
+                self.logger.info(f"Pitcher box not provided. Detecting pitcher using '{pitcher_detector_model}'.")
+
+                # 1. Read the first frame of the video
+                cap = cv2.VideoCapture(video_path)
+                ret, frame = cap.read()
+                cap.release()
+                if not ret:
+                    self.logger.error("Could not read the first frame of the video.")
+                    return {"status": "error", "message": "Could not read video frame."}
+
+                # 2. Load the pitcher detection model
+                # Assuming the model alias maps to a downloadable path or is locally available
+                pitcher_detector = YOLOModel(model_path=pitcher_detector_model, task='detect')
+                detections = pitcher_detector.predict(frame)
+
+                # 3. Find the pitcher's box from detections (assuming 'pitcher' is the label)
+                pitcher_detections = [d for d in detections if d['label'] == 'pitcher']
+
+                if not pitcher_detections:
+                    self.logger.error("No pitcher detected in the first frame.")
+                    return {"status": "error", "message": "No pitcher detected."}
+
+                # Get the box with the highest confidence
+                pitcher_detections.sort(key=lambda x: x['confidence'], reverse=True)
+                pitcher_box = pitcher_detections[0]['box']
+                self.logger.info(f"Pitcher detected with box: {pitcher_box}")
+
+            motion_analyzer = PitchMotionAnalyzer(
+                model_config=model_config,
+                model_checkpoint=model_checkpoint,
+                ball_model_path='ball_trackingv4',
+                device=device if device else self.device,
+                verbose=verbose if verbose else self.verbose
+            )
+
+            motion_analyzer.trim_pitching_motion(
+                video_path=video_path,
+                output_path=output_path,
+                pitcher_box=pitcher_box
+            )
+
+            self.logger.info("Pitcher motion trimming complete.")
+            return {"status": "success", "output_path": output_path}
+        except Exception as e:
+            self.logger.error(f"Failed to trim pitcher video: {e}")
+            return {"status": "error", "message": str(e)}

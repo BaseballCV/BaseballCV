@@ -20,3 +20,4 @@ streamlit-drawable-canvas==0.9.3
 google-generativeai==0.8.5
 google==3.0.0
 git+https://github.com/dylandru/yolov9.git
+segment-anything
