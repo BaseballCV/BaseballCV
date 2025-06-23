@@ -5,20 +5,21 @@ import supervision as sv
 import tempfile
 import shutil
 from pathlib import Path
+import os # Import os for listdir
 from sam2.build_sam import build_sam2_video_predictor
-from ultralytics import YOLO  # Correct import
+from ultralytics import YOLO
 from baseballcv.utilities import BaseballCVLogger
-from baseballcv.functions.load_tools import LoadTools  # Add this import
+from baseballcv.functions.load_tools import LoadTools
 
 class PitchMotionAnalyzer:
     """
     Analyzes a pitcher's motion using video segmentation and detection to find key moments.
     """
-    def __init__(self, 
-                 model_config: str, 
-                 model_checkpoint: str, 
+    def __init__(self,
+                 model_config: str,
+                 model_checkpoint: str,
                  ball_model_path: str = 'ball_trackingv4',
-                 device: str = 'cpu', 
+                 device: str = 'cpu',
                  verbose: bool = False):
         self.verbose = verbose
         self.logger = BaseballCVLogger.get_logger(self.__class__.__name__)
@@ -28,38 +29,32 @@ class PitchMotionAnalyzer:
             self.logger.set_level('WARNING')
 
         self.device = device
-        
+
         try:
             self.predictor = build_sam2_video_predictor(model_config, model_checkpoint)
-            
-            # FIX: Handle SAM2VideoPredictor device assignment properly
+
             try:
-                # Try different ways to move SAM2 predictor to device
                 if hasattr(self.predictor, 'model'):
                     self.predictor.model.to(device)
                 elif hasattr(self.predictor, 'sam'):
                     self.predictor.sam.to(device)
                 else:
-                    # Try moving the predictor directly
                     self.predictor = self.predictor.to(device)
             except AttributeError as e:
-                # If all methods fail, log warning but continue
                 self.logger.warning(f"Could not explicitly move SAM2 predictor to {device}: {e}")
             except Exception as e:
                 self.logger.warning(f"Unexpected error moving SAM2 to device: {e}")
-            
-            # Find the full path to the ball model and load it using ultralytics.YOLO
+
             load_tools = LoadTools()
             resolved_ball_model_path = load_tools.load_model(ball_model_path)
             self.ball_model = YOLO(resolved_ball_model_path)
             self.ball_model.to(device)
-            
+
             self.logger.info(f"SAM-2 and Ball Detection models loaded on {self.device}")
         except Exception as e:
             self.logger.error(f"Failed to load models: {e}")
             raise
 
-    # _calculate_iou method remains the same...
     @staticmethod
     def _calculate_iou(mask1, mask2):
         if mask1 is None or mask2 is None: return 0.0
@@ -68,19 +63,36 @@ class PitchMotionAnalyzer:
         if np.sum(union) == 0: return 1.0
         return np.sum(intersection) / np.sum(union)
 
-    # find_motion_start method remains the same...
     def find_motion_start(self, video_path: str, initial_box: list, iou_threshold: float = 0.97, frame_buffer: int = 3) -> int:
         self.logger.info("Analyzing video to find motion start...")
         temp_dir = tempfile.mkdtemp(prefix="pitch_motion_")
-        
+
         try:
-            frames_generator = sv.get_video_frames_generator(source_path=video_path)  # Changed from video_path to source_path
-            image_sink = sv.ImageSink(target_dir_path=temp_dir, overwrite=True)
-            with image_sink as sink:
-                for frame in frames_generator:
-                    sink.save_image(frame)
+            frames_generator = sv.get_video_frames_generator(source_path=video_path)
+            # Using a more specific image name pattern for clarity.
+            image_sink = sv.ImageSink(target_dir_path=temp_dir, image_name_pattern="frame_{:05d}.png", overwrite=True)
             
-            self.logger.info(f"Frames extracted to temporary directory: {temp_dir}")
+            files_written = 0
+            with image_sink as sink:
+                for i, frame in enumerate(frames_generator):
+                    # Add a check to ensure the frame is valid before saving.
+                    if frame is None:
+                        self.logger.warning(f"Frame {i} from video {video_path} is None and will be skipped.")
+                        continue
+                    sink.save_image(image=frame)
+                    files_written += 1
+            
+            # Add a guard clause to ensure that frames were actually extracted and written.
+            if files_written == 0:
+                self.logger.error(f"Failed to extract any valid frames from the video at '{video_path}'. The video file might be empty, corrupted, or in an unsupported format.")
+                raise ValueError(f"No frames could be extracted from {video_path}")
+
+            self.logger.info(f"{files_written} frames extracted to temporary directory: {temp_dir}")
+            
+            # For debugging, confirm the files are there before calling the predictor.
+            if self.verbose:
+                self.logger.info(f"First 5 files in temp dir: {os.listdir(temp_dir)[:5]}")
+            
             inference_state = self.predictor.init_state(video_path=temp_dir)
             box_prompt = torch.tensor([initial_box], device=self.device)
             _, _, mask_logits = self.predictor.add_new_prompts(
@@ -107,7 +119,7 @@ class PitchMotionAnalyzer:
         finally:
             shutil.rmtree(temp_dir)
             self.logger.info(f"Cleaned up temporary directory: {temp_dir}")
-            
+
     def find_ball_release(self, video_path: str, start_frame: int, pitcher_box: list, velocity_threshold: int = 20) -> int:
         """
         Finds the frame index where the ball is released by tracking its velocity.
@@ -127,9 +139,8 @@ class PitchMotionAnalyzer:
             if not ret:
                 break
             
-            # Use ultralytics standard predict method
             results = self.ball_model.predict(frame, verbose=False)
-            result = results[0] # Get results for the first image
+            result = results[0]
             
             ball_detections = []
             for box in result.boxes:
@@ -167,7 +178,6 @@ class PitchMotionAnalyzer:
         cap.release()
         return frame_idx
     
-    # trim_pitching_motion method remains the same...
     def trim_pitching_motion(self, video_path: str, output_path: str, pitcher_box: list, end_frame_offset: int = 5):
         start_frame = self.find_motion_start(video_path=video_path, initial_box=pitcher_box)
         release_frame = self.find_ball_release(video_path=video_path, start_frame=start_frame, pitcher_box=pitcher_box)
