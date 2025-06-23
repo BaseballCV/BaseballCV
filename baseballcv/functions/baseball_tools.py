@@ -8,7 +8,6 @@ from typing import Dict, List, Optional # Added Optional
 import concurrent.futures
 from .utils import DistanceToZone, GloveTracker, CommandAnalyzer, PitchMotionAnalyzer
 import cv2
-from baseballcv.model.od.yolo import YOLOModel
 from baseballcv.utilities import BaseballCVLogger
 from baseballcv.functions.savant_scraper import BaseballSavVideoScraper
 
