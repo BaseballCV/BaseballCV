@@ -6,6 +6,9 @@ import tempfile
 import shutil
 from pathlib import Path
 import os
+import time
+import matplotlib.pyplot as plt
+from pkg_resources import resource_filename
 from sam2.build_sam import build_sam2_video_predictor
 from ultralytics import YOLO
 from baseballcv.utilities import BaseballCVLogger
@@ -31,9 +34,21 @@ class PitchMotionAnalyzer:
         self.device = device
 
         try:
+            if not os.path.exists(model_config):
+                self.logger.info(f"Provided model_config '{model_config}' not found as a direct path. Trying to resolve within sam2 package...")
+                try:
+                    resolved_config_path = resource_filename('sam2', os.path.join('configs', 'sam2', os.path.basename(model_config)))
+                    if os.path.exists(resolved_config_path):
+                        model_config = resolved_config_path
+                        self.logger.info(f"Resolved model_config path to: {model_config}")
+                    else:
+                        raise FileNotFoundError
+                except (ModuleNotFoundError, FileNotFoundError, KeyError):
+                     self.logger.error(f"Could not resolve the SAM-2 model config '{model_config}' within the package. Please provide a full, valid path to the config file.")
+                     raise FileNotFoundError(f"SAM-2 model config not found: {model_config}")
+
             self.predictor = build_sam2_video_predictor(model_config, model_checkpoint)
 
-            # FIX: Handle SAM2VideoPredictor device assignment properly
             try:
                 if hasattr(self.predictor, 'model'):
                     self.predictor.model.to(device)
@@ -64,7 +79,7 @@ class PitchMotionAnalyzer:
         if np.sum(union) == 0: return 1.0
         return np.sum(intersection) / np.sum(union)
 
-    def find_motion_start(self, video_path: str, initial_box: list, iou_threshold: float = 0.97, frame_buffer: int = 3) -> int:
+    def find_motion_start(self, video_path: str, initial_box: list, iou_threshold: float = 0.97, frame_buffer: int = 3, debug_viz_path: str = None) -> int:
         self.logger.info("Analyzing video to find motion start...")
         temp_dir = tempfile.mkdtemp(prefix="pitch_motion_")
         
@@ -88,43 +103,75 @@ class PitchMotionAnalyzer:
             
             inference_state = self.predictor.init_state(video_path=temp_dir)
             
-            # MODIFICATION: Use point prompt instead of bounding box, based on official notebook
             top_left_point = np.array([[initial_box[0], initial_box[1]]], dtype=np.float32)
-            point_labels = np.array([1], dtype=np.int32) # 1 for foreground point
+            point_labels = np.array([1], dtype=np.int32) 
 
             _, _, mask_logits = self.predictor.add_new_points(
                 inference_state=inference_state,
                 frame_idx=0,
-                obj_id=1, # Track a single object
+                obj_id=1,
                 points=top_left_point,
                 labels=point_labels,
             )
             prev_mask = (mask_logits > 0.0).cpu().numpy().squeeze()
 
+            if debug_viz_path:
+                frame_zero_path = os.path.join(temp_dir, "00000.jpeg")
+                if os.path.exists(frame_zero_path):
+                    frame_zero = cv2.imread(frame_zero_path)
+                    annotated_frame = sv.MaskAnnotator().annotate(scene=frame_zero.copy(), detections=sv.Detections(xyxy=sv.mask_to_xyxy(masks=np.array([prev_mask])), mask=np.array([prev_mask])))
+                    cv2.circle(annotated_frame, (int(top_left_point[0][0]), int(top_left_point[0][1])), 5, (0, 0, 255), -1)
+                    cv2.imwrite(os.path.join(debug_viz_path, "initial_mask.jpg"), annotated_frame)
+
             self.logger.info("Tracking pitcher's motion frame by frame using point prompt...")
+            iou_scores = []
+            motion_detected_frame = -1
+            
             for frame_idx, _, mask_logits in self.predictor.propagate_in_video(inference_state):
-                if frame_idx <= frame_buffer:
-                    prev_mask = (mask_logits > 0.0).cpu().numpy().squeeze()
-                    continue
                 current_mask = (mask_logits > 0.0).cpu().numpy().squeeze()
                 iou = self._calculate_iou(prev_mask, current_mask)
+                iou_scores.append((frame_idx, iou))
+                
                 if self.verbose:
                     self.logger.info(f"Frame {frame_idx}: IoU with previous frame = {iou:.4f}")
-                if iou < iou_threshold:
+
+                if iou < iou_threshold and motion_detected_frame == -1 and frame_idx > frame_buffer:
                     self.logger.info(f"Significant motion detected at frame {frame_idx}.")
-                    return frame_idx
+                    motion_detected_frame = frame_idx
+                    if debug_viz_path:
+                        frame_path = os.path.join(temp_dir, f"{frame_idx:05d}.jpeg")
+                        if os.path.exists(frame_path):
+                            frame = cv2.imread(frame_path)
+                            annotated_frame = sv.MaskAnnotator().annotate(scene=frame.copy(), detections=sv.Detections(xyxy=sv.mask_to_xyxy(masks=np.array([current_mask])), mask=np.array([current_mask])))
+                            cv2.imwrite(os.path.join(debug_viz_path, "motion_detection_frame.jpg"), annotated_frame)
+                
                 prev_mask = current_mask
-            
+
+            if debug_viz_path and iou_scores:
+                frames, ious = zip(*iou_scores)
+                plt.figure(figsize=(10, 5))
+                plt.plot(frames, ious, marker='o', linestyle='-')
+                plt.axhline(y=iou_threshold, color='r', linestyle='--', label=f'Threshold ({iou_threshold})')
+                if motion_detected_frame != -1:
+                    plt.axvline(x=motion_detected_frame, color='g', linestyle='--', label=f'Motion Start ({motion_detected_frame})')
+                plt.title("IoU Over Time")
+                plt.xlabel("Frame Index")
+                plt.ylabel("Intersection over Union (IoU)")
+                plt.legend()
+                plt.grid(True)
+                plt.savefig(os.path.join(debug_viz_path, "iou_plot.png"))
+                plt.close()
+
+            if motion_detected_frame != -1:
+                return motion_detected_frame
+
             self.logger.warning("No significant motion start detected. Returning frame 0.")
             return 0
         finally:
             shutil.rmtree(temp_dir)
             self.logger.info(f"Cleaned up temporary directory: {temp_dir}")
-
+    
     def find_ball_release(self, video_path: str, start_frame: int, pitcher_box: list, velocity_threshold: int = 20) -> int:
-        """
-        Finds the frame index where the ball is released by tracking its velocity.
-        """
         self.logger.info("Analyzing video to find ball release...")
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
@@ -137,8 +184,7 @@ class PitchMotionAnalyzer:
 
         while cap.isOpened():
             ret, frame = cap.read()
-            if not ret:
-                break
+            if not ret: break
             
             results = self.ball_model.predict(frame, verbose=False)
             result = results[0]
@@ -147,10 +193,7 @@ class PitchMotionAnalyzer:
             for box in result.boxes:
                 label = result.names[int(box.cls)]
                 if label == 'baseball':
-                    ball_detections.append({
-                        'box': box.xyxy[0].tolist(),
-                        'confidence': box.conf[0].item()
-                    })
+                    ball_detections.append({'box': box.xyxy[0].tolist(), 'confidence': box.conf[0].item()})
 
             if ball_detections:
                 ball_detections.sort(key=lambda x: x['confidence'], reverse=True)
@@ -179,8 +222,8 @@ class PitchMotionAnalyzer:
         cap.release()
         return frame_idx
     
-    def trim_pitching_motion(self, video_path: str, output_path: str, pitcher_box: list, end_frame_offset: int = 5):
-        start_frame = self.find_motion_start(video_path=video_path, initial_box=pitcher_box)
+    def trim_pitching_motion(self, video_path: str, output_path: str, pitcher_box: list, end_frame_offset: int = 15, debug_viz_path: str = None):
+        start_frame = self.find_motion_start(video_path=video_path, initial_box=pitcher_box, debug_viz_path=debug_viz_path)
         release_frame = self.find_ball_release(video_path=video_path, start_frame=start_frame, pitcher_box=pitcher_box)
         end_frame = release_frame + end_frame_offset
         
