@@ -5,7 +5,9 @@ import supervision as sv
 import tempfile
 import shutil
 from pathlib import Path
-import os # Import os for listdir
+import os
+import time 
+from pkg_resources import resource_filename
 from sam2.build_sam import build_sam2_video_predictor
 from ultralytics import YOLO
 from baseballcv.utilities import BaseballCVLogger
@@ -31,6 +33,22 @@ class PitchMotionAnalyzer:
         self.device = device
 
         try:
+            # More robust handling of the model_config path
+            if not os.path.exists(model_config):
+                self.logger.info(f"Provided model_config '{model_config}' not found as a direct path. Trying to resolve within sam2 package...")
+                try:
+                    # Assumes model_config is a filename like 'sam2_hiera_t.yaml'
+                    # and constructs the path to where it should be inside the installed package
+                    resolved_config_path = resource_filename('sam2', os.path.join('configs', 'sam2', os.path.basename(model_config)))
+                    if os.path.exists(resolved_config_path):
+                        model_config = resolved_config_path
+                        self.logger.info(f"Resolved model_config path to: {model_config}")
+                    else:
+                        raise FileNotFoundError
+                except (ModuleNotFoundError, FileNotFoundError, KeyError):
+                     self.logger.error(f"Could not resolve the SAM-2 model config '{model_config}' within the package. Please provide a full, valid path to the config file.")
+                     raise FileNotFoundError(f"SAM-2 model config not found: {model_config}")
+
             self.predictor = build_sam2_video_predictor(model_config, model_checkpoint)
 
             try:
@@ -69,30 +87,26 @@ class PitchMotionAnalyzer:
 
         try:
             frames_generator = sv.get_video_frames_generator(source_path=video_path)
-            # Using a more specific image name pattern for clarity.
             image_sink = sv.ImageSink(target_dir_path=temp_dir, image_name_pattern="frame_{:05d}.png", overwrite=True)
             
             files_written = 0
             with image_sink as sink:
                 for i, frame in enumerate(frames_generator):
-                    # Add a check to ensure the frame is valid before saving.
                     if frame is None:
                         self.logger.warning(f"Frame {i} from video {video_path} is None and will be skipped.")
                         continue
                     sink.save_image(image=frame)
                     files_written += 1
             
-            # Add a guard clause to ensure that frames were actually extracted and written.
             if files_written == 0:
-                self.logger.error(f"Failed to extract any valid frames from the video at '{video_path}'. The video file might be empty, corrupted, or in an unsupported format.")
+                self.logger.error(f"Failed to extract any valid frames from the video at '{video_path}'.")
                 raise ValueError(f"No frames could be extracted from {video_path}")
 
             self.logger.info(f"{files_written} frames extracted to temporary directory: {temp_dir}")
             
-            # For debugging, confirm the files are there before calling the predictor.
-            if self.verbose:
-                self.logger.info(f"First 5 files in temp dir: {os.listdir(temp_dir)[:5]}")
-            
+            # Brief pause to ensure filesystem sync, just in case.
+            time.sleep(0.1)
+
             inference_state = self.predictor.init_state(video_path=temp_dir)
             box_prompt = torch.tensor([initial_box], device=self.device)
             _, _, mask_logits = self.predictor.add_new_prompts(
