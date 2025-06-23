@@ -31,7 +31,22 @@ class PitchMotionAnalyzer:
         
         try:
             self.predictor = build_sam2_video_predictor(model_config, model_checkpoint)
-            self.predictor.model.to(device)
+            
+            # FIX: Handle SAM2VideoPredictor device assignment properly
+            try:
+                # Try different ways to move SAM2 predictor to device
+                if hasattr(self.predictor, 'model'):
+                    self.predictor.model.to(device)
+                elif hasattr(self.predictor, 'sam'):
+                    self.predictor.sam.to(device)
+                else:
+                    # Try moving the predictor directly
+                    self.predictor = self.predictor.to(device)
+            except AttributeError as e:
+                # If all methods fail, log warning but continue
+                self.logger.warning(f"Could not explicitly move SAM2 predictor to {device}: {e}")
+            except Exception as e:
+                self.logger.warning(f"Unexpected error moving SAM2 to device: {e}")
             
             # Find the full path to the ball model and load it using ultralytics.YOLO
             resolved_ball_model_path = ModelFunctionUtils.find_model_path(ball_model_path)
