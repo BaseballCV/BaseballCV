@@ -8,7 +8,7 @@ from pathlib import Path
 from sam2.build_sam import build_sam2_video_predictor
 from ultralytics import YOLO  # Correct import
 from baseballcv.utilities import BaseballCVLogger
-from baseballcv.model.utils import ModelFunctionUtils # To find the model path
+from baseballcv.functions.load_tools import LoadTools  # Add this import
 
 class PitchMotionAnalyzer:
     """
@@ -20,7 +20,7 @@ class PitchMotionAnalyzer:
                  ball_model_path: str = 'ball_trackingv4',
                  device: str = 'cpu', 
                  verbose: bool = False):
-        self.verbose = verbose # Moved verbose assignment up
+        self.verbose = verbose
         self.logger = BaseballCVLogger.get_logger(self.__class__.__name__)
         if self.verbose:
             self.logger.set_level('INFO')
@@ -49,7 +49,8 @@ class PitchMotionAnalyzer:
                 self.logger.warning(f"Unexpected error moving SAM2 to device: {e}")
             
             # Find the full path to the ball model and load it using ultralytics.YOLO
-            resolved_ball_model_path = ModelFunctionUtils.find_model_path(ball_model_path)
+            load_tools = LoadTools()
+            resolved_ball_model_path = load_tools.load_model(ball_model_path)
             self.ball_model = YOLO(resolved_ball_model_path)
             self.ball_model.to(device)
             
