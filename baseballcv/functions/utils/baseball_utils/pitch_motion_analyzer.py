@@ -20,9 +20,14 @@ class PitchMotionAnalyzer:
                  ball_model_path: str = 'ball_trackingv4',
                  device: str = 'cpu', 
                  verbose: bool = False):
-        self.logger = BaseballCVLogger.get_logger(self.__class__.__name__, verbose)
+        self.verbose = verbose # Moved verbose assignment up
+        self.logger = BaseballCVLogger.get_logger(self.__class__.__name__)
+        if self.verbose:
+            self.logger.set_level('INFO')
+        else:
+            self.logger.set_level('WARNING')
+
         self.device = device
-        self.verbose = verbose
         
         try:
             self.predictor = build_sam2_video_predictor(model_config, model_checkpoint)
