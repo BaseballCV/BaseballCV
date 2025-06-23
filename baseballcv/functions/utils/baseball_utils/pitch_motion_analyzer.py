@@ -6,8 +6,6 @@ import tempfile
 import shutil
 from pathlib import Path
 import os
-import time 
-from pkg_resources import resource_filename
 from sam2.build_sam import build_sam2_video_predictor
 from ultralytics import YOLO
 from baseballcv.utilities import BaseballCVLogger
@@ -17,11 +15,11 @@ class PitchMotionAnalyzer:
     """
     Analyzes a pitcher's motion using video segmentation and detection to find key moments.
     """
-    def __init__(self,
-                 model_config: str,
-                 model_checkpoint: str,
+    def __init__(self, 
+                 model_config: str, 
+                 model_checkpoint: str, 
                  ball_model_path: str = 'ball_trackingv4',
-                 device: str = 'cpu',
+                 device: str = 'cpu', 
                  verbose: bool = False):
         self.verbose = verbose
         self.logger = BaseballCVLogger.get_logger(self.__class__.__name__)
@@ -31,43 +29,32 @@ class PitchMotionAnalyzer:
             self.logger.set_level('WARNING')
 
         self.device = device
-
+        
         try:
-            # More robust handling of the model_config path
-            if not os.path.exists(model_config):
-                self.logger.info(f"Provided model_config '{model_config}' not found as a direct path. Trying to resolve within sam2 package...")
-                try:
-                    # Assumes model_config is a filename like 'sam2_hiera_t.yaml'
-                    # and constructs the path to where it should be inside the installed package
-                    resolved_config_path = resource_filename('sam2', os.path.join('configs', 'sam2', os.path.basename(model_config)))
-                    if os.path.exists(resolved_config_path):
-                        model_config = resolved_config_path
-                        self.logger.info(f"Resolved model_config path to: {model_config}")
-                    else:
-                        raise FileNotFoundError
-                except (ModuleNotFoundError, FileNotFoundError, KeyError):
-                     self.logger.error(f"Could not resolve the SAM-2 model config '{model_config}' within the package. Please provide a full, valid path to the config file.")
-                     raise FileNotFoundError(f"SAM-2 model config not found: {model_config}")
-
             self.predictor = build_sam2_video_predictor(model_config, model_checkpoint)
-
+            
+            # FIX: Handle SAM2VideoPredictor device assignment properly
             try:
+                # Try different ways to move SAM2 predictor to device
                 if hasattr(self.predictor, 'model'):
                     self.predictor.model.to(device)
                 elif hasattr(self.predictor, 'sam'):
                     self.predictor.sam.to(device)
                 else:
+                    # Try moving the predictor directly
                     self.predictor = self.predictor.to(device)
             except AttributeError as e:
+                # If all methods fail, log warning but continue
                 self.logger.warning(f"Could not explicitly move SAM2 predictor to {device}: {e}")
             except Exception as e:
                 self.logger.warning(f"Unexpected error moving SAM2 to device: {e}")
-
+            
+            # Find the full path to the ball model and load it using ultralytics.YOLO
             load_tools = LoadTools()
             resolved_ball_model_path = load_tools.load_model(ball_model_path)
             self.ball_model = YOLO(resolved_ball_model_path)
             self.ball_model.to(device)
-
+            
             self.logger.info(f"SAM-2 and Ball Detection models loaded on {self.device}")
         except Exception as e:
             self.logger.error(f"Failed to load models: {e}")
@@ -84,11 +71,10 @@ class PitchMotionAnalyzer:
     def find_motion_start(self, video_path: str, initial_box: list, iou_threshold: float = 0.97, frame_buffer: int = 3) -> int:
         self.logger.info("Analyzing video to find motion start...")
         temp_dir = tempfile.mkdtemp(prefix="pitch_motion_")
-
+        
         try:
             frames_generator = sv.get_video_frames_generator(source_path=video_path)
-            image_sink = sv.ImageSink(target_dir_path=temp_dir, image_name_pattern="frame_{:05d}.png", overwrite=True)
-            
+            image_sink = sv.ImageSink(target_dir_path=temp_dir, overwrite=True)
             files_written = 0
             with image_sink as sink:
                 for i, frame in enumerate(frames_generator):
@@ -97,16 +83,12 @@ class PitchMotionAnalyzer:
                         continue
                     sink.save_image(image=frame)
                     files_written += 1
-            
+
             if files_written == 0:
-                self.logger.error(f"Failed to extract any valid frames from the video at '{video_path}'.")
+                self.logger.error(f"Failed to extract any valid frames from the video at '{video_path}'. The video file might be empty, corrupted, or in an unsupported format.")
                 raise ValueError(f"No frames could be extracted from {video_path}")
-
-            self.logger.info(f"{files_written} frames extracted to temporary directory: {temp_dir}")
             
-            # Brief pause to ensure filesystem sync, just in case.
-            time.sleep(0.1)
-
+            self.logger.info(f"Frames extracted to temporary directory: {temp_dir}")
             inference_state = self.predictor.init_state(video_path=temp_dir)
             box_prompt = torch.tensor([initial_box], device=self.device)
             _, _, mask_logits = self.predictor.add_new_prompts(
@@ -133,7 +115,7 @@ class PitchMotionAnalyzer:
         finally:
             shutil.rmtree(temp_dir)
             self.logger.info(f"Cleaned up temporary directory: {temp_dir}")
-
+            
     def find_ball_release(self, video_path: str, start_frame: int, pitcher_box: list, velocity_threshold: int = 20) -> int:
         """
         Finds the frame index where the ball is released by tracking its velocity.
@@ -153,8 +135,9 @@ class PitchMotionAnalyzer:
             if not ret:
                 break
             
+            # Use ultralytics standard predict method
             results = self.ball_model.predict(frame, verbose=False)
-            result = results[0]
+            result = results[0] # Get results for the first image
             
             ball_detections = []
             for box in result.boxes:
