@@ -34,19 +34,8 @@ class PitchMotionAnalyzer:
         self.device = device
 
         try:
-            if not os.path.exists(model_config):
-                self.logger.info(f"Provided model_config '{model_config}' not found as a direct path. Trying to resolve within sam2 package...")
-                try:
-                    resolved_config_path = resource_filename('sam2', os.path.join('configs', 'sam2', os.path.basename(model_config)))
-                    if os.path.exists(resolved_config_path):
-                        model_config = resolved_config_path
-                        self.logger.info(f"Resolved model_config path to: {model_config}")
-                    else:
-                        raise FileNotFoundError
-                except (ModuleNotFoundError, FileNotFoundError, KeyError):
-                     self.logger.error(f"Could not resolve the SAM-2 model config '{model_config}' within the package. Please provide a full, valid path to the config file.")
-                     raise FileNotFoundError(f"SAM-2 model config not found: {model_config}")
-
+            # REVERTED: Pass model_config directly to the builder without resolving the path.
+            # The sam2 library handles path resolution internally via hydra.
             self.predictor = build_sam2_video_predictor(model_config, model_checkpoint)
 
             try:
@@ -109,7 +98,7 @@ class PitchMotionAnalyzer:
             _, _, mask_logits = self.predictor.add_new_points(
                 inference_state=inference_state,
                 frame_idx=0,
-                obj_id=1,
+                obj_id=1, 
                 points=top_left_point,
                 labels=point_labels,
             )
