@@ -74,7 +74,7 @@ class PitchMotionAnalyzer:
         temp_dir = tempfile.mkdtemp(prefix="pitch_motion_")
         
         try:
-            frames_generator = sv.get_video_frames_generator(video_path=video_path)
+            frames_generator = sv.get_video_frames_generator(source_path=video_path)  # Changed from video_path to source_path
             image_sink = sv.ImageSink(target_dir_path=temp_dir, overwrite=True)
             with image_sink as sink:
                 for frame in frames_generator:
