@@ -6,8 +6,6 @@ import tempfile
 import shutil
 from pathlib import Path
 import os
-import time 
-from pkg_resources import resource_filename
 from sam2.build_sam import build_sam2_video_predictor
 from ultralytics import YOLO
 from baseballcv.utilities import BaseballCVLogger
@@ -33,21 +31,9 @@ class PitchMotionAnalyzer:
         self.device = device
 
         try:
-            if not os.path.exists(model_config):
-                self.logger.info(f"Provided model_config '{model_config}' not found as a direct path. Trying to resolve within sam2 package...")
-                try:
-                    resolved_config_path = resource_filename('sam2', os.path.join('configs', 'sam2', os.path.basename(model_config)))
-                    if os.path.exists(resolved_config_path):
-                        model_config = resolved_config_path
-                        self.logger.info(f"Resolved model_config path to: {model_config}")
-                    else:
-                        raise FileNotFoundError
-                except (ModuleNotFoundError, FileNotFoundError, KeyError):
-                     self.logger.error(f"Could not resolve the SAM-2 model config '{model_config}' within the package. Please provide a full, valid path to the config file.")
-                     raise FileNotFoundError(f"SAM-2 model config not found: {model_config}")
-
             self.predictor = build_sam2_video_predictor(model_config, model_checkpoint)
 
+            # FIX: Handle SAM2VideoPredictor device assignment properly
             try:
                 if hasattr(self.predictor, 'model'):
                     self.predictor.model.to(device)
@@ -81,40 +67,41 @@ class PitchMotionAnalyzer:
     def find_motion_start(self, video_path: str, initial_box: list, iou_threshold: float = 0.97, frame_buffer: int = 3) -> int:
         self.logger.info("Analyzing video to find motion start...")
         temp_dir = tempfile.mkdtemp(prefix="pitch_motion_")
-
+        
         try:
-            # --- MANUAL FRAME EXTRACTION USING OPENCV ---
-            cap = cv2.VideoCapture(video_path)
-            if not cap.isOpened():
-                self.logger.error(f"OpenCV could not open video: {video_path}")
-                raise IOError(f"Cannot open video file: {video_path}")
-
+            frames_generator = sv.get_video_frames_generator(source_path=video_path)
+            image_sink = sv.ImageSink(target_dir_path=temp_dir, image_name_pattern="{:05d}.jpeg", overwrite=True)
             files_written = 0
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                image_path = os.path.join(temp_dir, f"frame_{files_written:05d}.png")
-                # Directly write the frame using cv2.imwrite
-                cv2.imwrite(image_path, frame)
-                files_written += 1
-            cap.release()
-            # --- END MANUAL FRAME EXTRACTION ---
-
+            with image_sink as sink:
+                for frame in frames_generator:
+                    if frame is None:
+                        self.logger.warning("A null frame was skipped during video processing.")
+                        continue
+                    sink.save_image(frame)
+                    files_written += 1
+            
             if files_written == 0:
-                self.logger.error(f"Failed to extract any frames from the video at '{video_path}'. The file may be corrupt.")
+                self.logger.error(f"Failed to extract any frames from {video_path}. The video may be corrupt.")
                 raise ValueError(f"No frames could be extracted from {video_path}")
 
             self.logger.info(f"{files_written} frames extracted to temporary directory: {temp_dir}")
             
             inference_state = self.predictor.init_state(video_path=temp_dir)
-            box_prompt = torch.tensor([initial_box], device=self.device)
-            _, _, mask_logits = self.predictor.add_new_prompts(
-                inference_state=inference_state, frame_idx=0, prompts={"bboxes": box_prompt}
+            
+            # MODIFICATION: Use point prompt instead of bounding box, based on official notebook
+            top_left_point = np.array([[initial_box[0], initial_box[1]]], dtype=np.float32)
+            point_labels = np.array([1], dtype=np.int32) # 1 for foreground point
+
+            _, _, mask_logits = self.predictor.add_new_points(
+                inference_state=inference_state,
+                frame_idx=0,
+                obj_id=1, # Track a single object
+                points=top_left_point,
+                labels=point_labels,
             )
             prev_mask = (mask_logits > 0.0).cpu().numpy().squeeze()
 
-            self.logger.info("Tracking pitcher's motion frame by frame...")
+            self.logger.info("Tracking pitcher's motion frame by frame using point prompt...")
             for frame_idx, _, mask_logits in self.predictor.propagate_in_video(inference_state):
                 if frame_idx <= frame_buffer:
                     prev_mask = (mask_logits > 0.0).cpu().numpy().squeeze()
