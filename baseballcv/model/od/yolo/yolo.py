@@ -1,6 +1,6 @@
 import os
 from typing import Dict, List, Optional, Union
-from baseballcv.functions.utils import check_import 
+from baseballcv.utilities.environment import check_import 
 from baseballcv.model.utils import ModelFunctionUtils
 from pkg_resources import resource_filename
 from baseballcv.utilities import BaseballCVLogger
