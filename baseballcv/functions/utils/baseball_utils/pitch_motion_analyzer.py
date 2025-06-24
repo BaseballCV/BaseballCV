@@ -549,144 +549,299 @@ class PitchMotionAnalyzer:
         self.logger.warning(f"Ball release detection failed, returning frame {frame_idx}")
         return frame_idx
 
-    def trim_pitcher_video(self, 
-                            video_path: str, 
-                            output_path: str, 
-                            pitcher_box: list = None,
-                            pitcher_detector_model: str = 'phc_detector',
-                            model_config: str = 'models/segmentation/sam2/sam2_hiera_t.yaml', 
-                            model_checkpoint: str = 'models/segmentation/sam2/sam2_hiera_tiny.pt',
-                            device: str = None,
-                            verbose: bool = None,
-                            end_frame_offset: int = 15,
-                            create_debug_visuals: bool = False,
-                            create_overlay_video: bool = True,
-                            iou_threshold: float = 0.95,
-                            stabilization_threshold: float = 0.96,
-                            min_stable_frames: int = 5,
-                            max_detection_frames: int = 30):
+    def trim_pitching_motion(self, 
+                              video_path: str, 
+                              output_path: str, 
+                              pitcher_box: list = None,
+                              end_frame_offset: int = 15,
+                              debug_viz_path: str = None,
+                              create_overlay_video: bool = True,
+                              iou_threshold: float = 0.95,
+                              stabilization_threshold: float = 0.96,
+                              min_stable_frames: int = 5) -> None:
         """
-        Analyzes a video to trim it to the pitcher's motion using SAM-2 segmentation.
+        Main method to trim a baseball video to the pitcher's motion using SAM-2 segmentation.
         
-        This method uses computer vision to automatically detect:
-        1. The pitcher (using PHC detector across multiple frames if needed)
-        2. The start of pitching motion (using SAM-2 segmentation and IoU tracking)
-        3. The end of pitching motion (using SAM-2 segmentation stabilization in follow-through)
+        This method coordinates the entire trimming process:
+        1. Detects motion start using SAM-2 segmentation and IoU tracking
+        2. Detects motion end using segmentation stabilization in follow-through
+        3. Trims the video to the detected motion boundaries
         
         Args:
-            video_path (str): Path to the input video file.
-            output_path (str): Path to save the trimmed video file.
-            pitcher_box (list, optional): Bounding box [x1, y1, x2, y2] for the pitcher. 
-                                        If None, will auto-detect using pitcher_detector_model.
-            pitcher_detector_model (str): Model alias for pitcher detection. Defaults to 'phc_detector'.
-            model_config (str): Path to the SAM-2 model config file.
-            model_checkpoint (str): Path to the SAM-2 model checkpoint file.
-            device (str, optional): Device to use for analysis ('cpu', 'cuda', 'mps'). 
-                                Uses class default if None.
-            verbose (bool, optional): Enable verbose logging. Uses class default if None.
-            end_frame_offset (int): Number of frames to include after motion end. Defaults to 15.
-            create_debug_visuals (bool): Whether to create debug visualizations. Defaults to False.
-            create_overlay_video (bool): Whether to create video with segmentation overlay. Defaults to True.
-            iou_threshold (float): IoU threshold for motion start detection. Defaults to 0.95.
-            stabilization_threshold (float): IoU threshold for motion end detection. Defaults to 0.96.
-            min_stable_frames (int): Minimum stable frames for motion end. Defaults to 5.
-            max_detection_frames (int): Maximum frames to search for pitcher. Defaults to 30.
+            video_path (str): Path to the input video file
+            output_path (str): Path to save the trimmed video file
+            pitcher_box (list): Bounding box [x1, y1, x2, y2] for the pitcher
+            end_frame_offset (int): Number of frames to include after motion end
+            debug_viz_path (str): Path to save debug visualizations
+            create_overlay_video (bool): Whether to create video with segmentation overlay
+            iou_threshold (float): IoU threshold for motion start detection
+            stabilization_threshold (float): IoU threshold for motion end detection  
+            min_stable_frames (int): Minimum stable frames for motion end
             
         Returns:
-            dict: Results containing:
-                - status: 'success' or 'error'
-                - output_path: Path to trimmed video (if successful)
-                - debug_path: Path to debug visualizations (if created)
-                - message: Error message (if failed)
-                - start_frame: Frame where motion starts
-                - motion_end_frame: Frame where motion ends (follow-through stabilization)
-                - end_frame: Final frame of trimmed video
+            None (saves trimmed video to output_path and debug files to debug_viz_path)
         """
-        self.logger.info(f"Initializing Enhanced Pitch Motion Trimmer for video: {video_path}")
+        self.logger.info("Starting segmentation-based pitch motion trimming...")
         
-        # Setup debug directory if requested
-        debug_viz_path = None
-        if create_debug_visuals:
-            video_name = os.path.splitext(os.path.basename(video_path))[0]
-            debug_viz_path = os.path.join(os.path.dirname(output_path), f"debug_visuals_{video_name}")
-            os.makedirs(debug_viz_path, exist_ok=True)
-            self.logger.info(f"Debug visuals will be saved to: {debug_viz_path}")
-
-        try:
-            # Use method parameters or fall back to class defaults
-            analysis_device = device if device else self.device
-            analysis_verbose = verbose if verbose is not None else self.verbose
-            
-            # Initialize motion analyzer first to get access to multi-frame detection
-            motion_analyzer = PitchMotionAnalyzer(
-                model_config=model_config,
-                model_checkpoint=model_checkpoint,
-                ball_model_path='ball_trackingv4',
-                pitcher_detector_model=pitcher_detector_model,
-                device=analysis_device,
-                verbose=analysis_verbose
-            )
-            
-            # Auto-detect pitcher if no box provided (check multiple frames)
-            if pitcher_box is None:
-                self.logger.info(f"Pitcher box not provided. Detecting pitcher using '{pitcher_detector_model}' across multiple frames.")
-                
-                pitcher_box, pitcher_frame = motion_analyzer.detect_pitcher_box_multiframe(
-                    video_path, 
-                    max_frames=max_detection_frames
-                )
-                
-                if pitcher_box is None:
-                    error_msg = f"No pitcher detected in first {max_detection_frames} frames. Try a different video or adjust detection parameters."
-                    self.logger.error(error_msg)
-                    return {"status": "error", "message": error_msg}
-
-                self.logger.info(f"Pitcher auto-detected in frame {pitcher_frame} with box: {pitcher_box}")
-
-            # Perform the trimming analysis
-            self.logger.info("Starting segmentation-based pitch motion analysis...")
-            self.logger.info(f"Motion end detection: {min_stable_frames} stable frames with IoU > {stabilization_threshold}")
-            
-            motion_analyzer.trim_pitching_motion(
-                video_path=video_path,
-                output_path=output_path,
-                pitcher_box=pitcher_box,
-                end_frame_offset=end_frame_offset,
+        # Step 1: Detect motion start using SAM-2 segmentation
+        self.logger.info("Phase 1: Detecting motion start with SAM-2 segmentation...")
+        motion_start_frame = self.find_motion_start(
+            video_path=video_path,
+            initial_box=pitcher_box,
+            iou_threshold=iou_threshold,
+            debug_viz_path=debug_viz_path,
+            create_overlay_video=create_overlay_video
+        )
+        
+        self.logger.info(f"Motion start detected at frame {motion_start_frame}")
+        
+        # Step 2: Detect motion end using segmentation stabilization
+        self.logger.info("Phase 2: Detecting motion end with segmentation stabilization...")
+        motion_end_frame = self._find_motion_end_with_stabilization(
+            video_path=video_path,
+            start_frame=motion_start_frame,
+            pitcher_box=pitcher_box,
+            stabilization_threshold=stabilization_threshold,
+            min_stable_frames=min_stable_frames,
+            debug_viz_path=debug_viz_path
+        )
+        
+        self.logger.info(f"Motion end detected at frame {motion_end_frame}")
+        
+        # Step 3: Calculate final trim boundaries
+        final_end_frame = motion_end_frame + end_frame_offset
+        
+        # Step 4: Trim the video
+        self.logger.info(f"Phase 3: Trimming video from frame {motion_start_frame} to {final_end_frame}")
+        self._trim_video_to_frames(
+            input_path=video_path,
+            output_path=output_path,
+            start_frame=motion_start_frame,
+            end_frame=final_end_frame
+        )
+        
+        # Step 5: Save summary information
+        if debug_viz_path:
+            self._save_trim_summary(
                 debug_viz_path=debug_viz_path,
-                create_overlay_video=create_overlay_video
+                start_frame=motion_start_frame,
+                motion_end_frame=motion_end_frame,
+                end_frame=final_end_frame,
+                video_path=video_path
             )
+        
+        self.logger.info(f"✅ Pitch motion trimming complete! Video saved to: {output_path}")
 
-            self.logger.info("Segmentation-based pitcher motion trimming complete.")
+    def _find_motion_end_with_stabilization(self, 
+                                           video_path: str, 
+                                           start_frame: int,
+                                           pitcher_box: list = None,
+                                           stabilization_threshold: float = 0.96,
+                                           min_stable_frames: int = 5,
+                                           debug_viz_path: str = None) -> int:
+        """
+        Find motion end by detecting when pitcher segmentation stabilizes in follow-through.
+        
+        Args:
+            video_path: Path to video file
+            start_frame: Frame to start looking for motion end  
+            pitcher_box: Bounding box of pitcher
+            stabilization_threshold: IoU threshold for stable segmentation
+            min_stable_frames: Minimum frames of stability required
+            debug_viz_path: Path to save debug visualizations
             
-            # Prepare return data
-            result = {
-                "status": "success", 
-                "output_path": output_path,
-                "debug_path": debug_viz_path
-            }
+        Returns:
+            Frame index where motion ends (follow-through stabilization)
+        """
+        self.logger.info(f"Analyzing motion end from frame {start_frame}...")
+        
+        temp_dir = tempfile.mkdtemp(prefix="motion_end_")
+        
+        try:
+            # Extract frames starting from motion start
+            frames_generator = sv.get_video_frames_generator(source_path=video_path)
+            image_sink = sv.ImageSink(target_dir_path=temp_dir, image_name_pattern="{:05d}.jpeg", overwrite=True)
             
-            # Add frame information if summary file exists
-            if debug_viz_path:
-                summary_file = os.path.join(debug_viz_path, "trim_summary.txt")
-                if os.path.exists(summary_file):
-                    try:
-                        with open(summary_file, 'r') as f:
-                            for line in f:
-                                if ':' in line:
-                                    key, value = line.strip().split(':', 1)
-                                    try:
-                                        result[key.strip()] = int(value.strip())
-                                    except ValueError:
-                                        try:
-                                            result[key.strip()] = float(value.strip())
-                                        except ValueError:
-                                            result[key.strip()] = value.strip()
-                    except Exception as e:
-                        self.logger.warning(f"Could not read summary file: {e}")
+            frame_idx = 0
+            frames_written = 0
             
-            return result
+            with image_sink as sink:
+                for frame in frames_generator:
+                    if frame_idx >= start_frame:
+                        sink.save_image(frame)
+                        frames_written += 1
+                        
+                        # Stop after reasonable number of frames
+                        if frames_written > 100:
+                            break
+                            
+                    frame_idx += 1
             
-        except Exception as e:
-            error_msg = str(e)
-            self.logger.error(f"Failed to trim pitcher video: {error_msg}", exc_info=True)
-            return {"status": "error", "message": error_msg, "debug_path": debug_viz_path}
+            self.logger.info(f"Extracted {frames_written} frames starting from frame {start_frame}")
+            
+            # Initialize SAM-2 for motion end detection
+            inference_state = self.predictor.init_state(video_path=temp_dir)
+            
+            # Use pitcher center as point prompt
+            center_x = (pitcher_box[0] + pitcher_box[2]) / 2
+            center_y = (pitcher_box[1] + pitcher_box[3]) / 2
+            center_point = np.array([[center_x, center_y]], dtype=np.float32)
+            point_labels = np.array([1], dtype=np.int32)
+
+            _, _, mask_logits = self.predictor.add_new_points(
+                inference_state=inference_state,
+                frame_idx=0,
+                obj_id=1,
+                points=center_point,
+                labels=point_labels,
+            )
+            
+            prev_mask = (mask_logits > 0.0).cpu().numpy().squeeze()
+            
+            # Track stability through frames
+            self.logger.info("Tracking segmentation stability to find motion end...")
+            iou_scores = []
+            stable_count = 0
+            motion_end_frame = -1
+            
+            for frame_idx, _, mask_logits in self.predictor.propagate_in_video(inference_state):
+                current_mask = (mask_logits > 0.0).cpu().numpy().squeeze()
+                iou = self._calculate_iou(prev_mask, current_mask)
+                iou_scores.append((start_frame + frame_idx, iou))
+                
+                if self.verbose:
+                    self.logger.info(f"Frame {start_frame + frame_idx}: IoU = {iou:.4f}, Stable count = {stable_count}")
+                
+                # Check for stabilization (high IoU = little change)
+                if iou >= stabilization_threshold:
+                    stable_count += 1
+                    if stable_count >= min_stable_frames and motion_end_frame == -1:
+                        motion_end_frame = start_frame + frame_idx - min_stable_frames + 1
+                        self.logger.info(f"Motion end detected at frame {motion_end_frame} (stabilization achieved)")
+                        
+                        if debug_viz_path:
+                            frame_path = os.path.join(temp_dir, f"{frame_idx:05d}.jpeg")
+                            if os.path.exists(frame_path):
+                                frame = cv2.imread(frame_path)
+                                annotated_frame = sv.MaskAnnotator(color_lookup=sv.ColorLookup.INDEX).annotate(
+                                    scene=frame.copy(), 
+                                    detections=sv.Detections(
+                                        xyxy=sv.mask_to_xyxy(masks=np.array([current_mask])), 
+                                        mask=np.array([current_mask])
+                                    )
+                                )
+                                cv2.imwrite(os.path.join(debug_viz_path, "motion_end_frame.jpg"), annotated_frame)
+                        break
+                else:
+                    stable_count = 0  # Reset if stability breaks
+                
+                prev_mask = current_mask
+                
+                # Stop if we've gone too far
+                if frame_idx > 80:
+                    self.logger.warning("Motion end detection timeout - using last frame")
+                    motion_end_frame = start_frame + frame_idx
+                    break
+            
+            # Save motion end analysis plot
+            if debug_viz_path and iou_scores:
+                frames, ious = zip(*iou_scores)
+                plt.figure(figsize=(12, 6))
+                plt.plot(frames, ious, marker='o', linestyle='-', markersize=3)
+                plt.axhline(y=stabilization_threshold, color='r', linestyle='--', 
+                           label=f'Stabilization Threshold ({stabilization_threshold})')
+                if motion_end_frame != -1:
+                    plt.axvline(x=motion_end_frame, color='g', linestyle='--', 
+                               label=f'Motion End (Frame {motion_end_frame})')
+                plt.title("Pitcher Segmentation Stability Analysis (Motion End Detection)")
+                plt.xlabel("Frame Index")
+                plt.ylabel("Intersection over Union (IoU)")
+                plt.legend()
+                plt.grid(True, alpha=0.3)
+                plt.tight_layout()
+                plt.savefig(os.path.join(debug_viz_path, "motion_end_analysis.png"), dpi=150)
+                plt.close()
+            
+            if motion_end_frame == -1:
+                self.logger.warning(f"Motion end not detected with stabilization. Using frame {start_frame + 50}")
+                motion_end_frame = start_frame + 50
+                
+            return motion_end_frame
+            
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def _trim_video_to_frames(self, input_path: str, output_path: str, start_frame: int, end_frame: int) -> None:
+        """
+        Trim video to specified frame range using OpenCV.
+        
+        Args:
+            input_path: Path to input video
+            output_path: Path to save trimmed video
+            start_frame: Starting frame number
+            end_frame: Ending frame number
+        """
+        cap = cv2.VideoCapture(input_path)
+        if not cap.isOpened():
+            raise ValueError(f"Cannot open video: {input_path}")
+        
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+        
+        # Seek to start frame
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+        
+        frame_count = start_frame
+        while frame_count <= end_frame:
+            ret, frame = cap.read()
+            if not ret:
+                break
+                
+            out.write(frame)
+            frame_count += 1
+        
+        cap.release()
+        out.release()
+        
+        self.logger.info(f"Video trimmed from frame {start_frame} to {end_frame} and saved to {output_path}")
+
+    def _save_trim_summary(self, debug_viz_path: str, start_frame: int, motion_end_frame: int, 
+                          end_frame: int, video_path: str) -> None:
+        """
+        Save a summary of the trimming process to a text file.
+        
+        Args:
+            debug_viz_path: Directory to save summary file
+            start_frame: Frame where motion starts
+            motion_end_frame: Frame where motion ends
+            end_frame: Final frame of trimmed video
+            video_path: Path to original video
+        """
+        summary_file = os.path.join(debug_viz_path, "trim_summary.txt")
+        
+        # Get video info
+        cap = cv2.VideoCapture(video_path)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        cap.release()
+        
+        duration_seconds = (end_frame - start_frame) / fps if fps > 0 else 0
+        
+        with open(summary_file, 'w') as f:
+            f.write("BaseballCV Pitch Motion Trimming Summary\n")
+            f.write("=" * 40 + "\n\n")
+            f.write(f"Original Video: {video_path}\n")
+            f.write(f"Total Frames: {total_frames}\n")
+            f.write(f"FPS: {fps:.2f}\n\n")
+            f.write("Trimming Results:\n")
+            f.write(f"start_frame: {start_frame}\n")
+            f.write(f"motion_end_frame: {motion_end_frame}\n")
+            f.write(f"end_frame: {end_frame}\n")
+            f.write(f"duration_seconds: {duration_seconds:.2f}\n")
+            f.write(f"frames_trimmed: {end_frame - start_frame}\n")
+        
+        self.logger.info(f"Trim summary saved to {summary_file}")
