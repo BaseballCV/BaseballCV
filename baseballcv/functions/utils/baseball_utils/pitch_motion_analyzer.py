@@ -344,210 +344,205 @@ class PitchMotionAnalyzer:
             shutil.rmtree(temp_dir)
             self.logger.info(f"Cleaned up temporary directory: {temp_dir}")
 
-    def find_ball_release(self, video_path: str, start_frame: int, pitcher_box: list = None, 
-                         min_consecutive_detections: int = 3, min_frames_outside_pitcher: int = 2,
-                         debug_viz_path: str = None) -> int:
+    def find_motion_end_by_segmentation(self, video_path: str, start_frame: int, 
+                                       stabilization_threshold: float = 0.96, 
+                                       min_stable_frames: int = 5,
+                                       search_window: int = 100,
+                                       debug_viz_path: str = None) -> int:
         """
-        Find when the ball is released using robust detection criteria:
-        1. Ball must be consistently detected for several frames
-        2. Ball must be outside the pitcher's segmentation mask
-        3. This provides much more reliable detection than velocity alone
+        Find when the pitcher's motion ends using segmentation stabilization.
+        
+        This method continues SAM-2 tracking after motion start and looks for when
+        the pitcher reaches a stable "follow-through" position, indicated by 
+        high IoU values for several consecutive frames.
         
         Args:
             video_path: Path to the video file
-            start_frame: Frame to start looking for ball release
-            pitcher_box: Bounding box of pitcher (for filtering detections)
-            min_consecutive_detections: Minimum consecutive frames ball must be detected
-            min_frames_outside_pitcher: Minimum frames ball must be outside pitcher mask
+            start_frame: Frame where motion started
+            stabilization_threshold: IoU threshold above which motion is considered stable
+            min_stable_frames: Minimum consecutive frames of stability required
+            search_window: Maximum frames to search after motion start
             debug_viz_path: Path to save debug visualizations
             
         Returns:
-            Frame index where ball release occurs
+            Frame index where pitcher motion ends (reaches stable follow-through)
         """
-        self.logger.info(f"Analyzing video to find ball release starting from frame {start_frame}...")
-        self.logger.info(f"Using robust detection: {min_consecutive_detections} consecutive detections, {min_frames_outside_pitcher} frames outside pitcher")
+        self.logger.info(f"Analyzing pitcher segmentation to find motion end starting from frame {start_frame}...")
+        self.logger.info(f"Looking for {min_stable_frames} consecutive frames with IoU > {stabilization_threshold}")
         
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            self.logger.error(f"Cannot open video: {video_path}")
-            return start_frame + 50
-
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-        frame_idx = start_frame
+        temp_dir = tempfile.mkdtemp(prefix="motion_end_")
         
-        # Track ball detection state
-        consecutive_detections = 0
-        frames_outside_pitcher = 0
-        ball_positions = []
-        detection_history = []
-        
-        # Get video properties for debug video
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-        debug_frames = []
-
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret: 
-                break
+        try:
+            # Extract frames for the search window
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                self.logger.error(f"Cannot open video: {video_path}")
+                return start_frame + 50
             
-            # Run ball detection
-            results = self.ball_model.predict(frame, verbose=False)
-            result = results[0]
+            # Skip to start frame
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
             
-            ball_detections = []
-            for box in result.boxes:
-                label = result.names[int(box.cls)]
-                if label == 'baseball':
-                    ball_detections.append({
-                        'box': box.xyxy[0].tolist(), 
-                        'confidence': box.conf[0].item(),
-                        'center': [(box.xyxy[0][0] + box.xyxy[0][2]) / 2, 
-                                  (box.xyxy[0][1] + box.xyxy[0][3]) / 2]
-                    })
-
-            current_ball_pos = None
-            is_outside_pitcher = False
+            # Extract frames for analysis
+            frames_generator = sv.get_video_frames_generator(source_path=video_path)
+            image_sink = sv.ImageSink(target_dir_path=temp_dir, image_name_pattern="{:05d}.jpeg", overwrite=True)
             
-            if ball_detections:
-                # Use the most confident detection
-                ball_detections.sort(key=lambda x: x['confidence'], reverse=True)
-                best_ball = ball_detections[0]
-                current_ball_pos = best_ball['center']
-                
-                # Check if ball is outside pitcher mask (if we have one)
-                if hasattr(self, 'current_pitcher_mask') and self.current_pitcher_mask is not None:
-                    ball_x, ball_y = int(current_ball_pos[0]), int(current_ball_pos[1])
+            frame_idx = 0
+            frames_extracted = 0
+            
+            # Skip frames until start_frame
+            for i, frame in enumerate(frames_generator):
+                if i < start_frame:
+                    continue
+                if frame is None:
+                    continue
+                if frames_extracted >= search_window:
+                    break
                     
-                    # Check if ball center is outside the pitcher mask
-                    if (0 <= ball_x < self.current_pitcher_mask.shape[1] and 
-                        0 <= ball_y < self.current_pitcher_mask.shape[0]):
-                        is_outside_pitcher = not self.current_pitcher_mask[ball_y, ball_x]
-                    else:
-                        is_outside_pitcher = True  # Ball is outside frame bounds
+                image_sink.save_image(frame)
+                frames_extracted += 1
+                
+            if frames_extracted == 0:
+                self.logger.error("No frames extracted for motion end analysis")
+                return start_frame + 50
+                
+            self.logger.info(f"{frames_extracted} frames extracted for motion end analysis")
+            
+            # Get the pitcher mask from the motion start detection 
+            # (we stored it in self.current_pitcher_mask during motion start)
+            if not hasattr(self, 'current_pitcher_mask') or self.current_pitcher_mask is None:
+                self.logger.warning("No pitcher mask available from motion start, cannot detect motion end")
+                return start_frame + 50
+            
+            # Initialize SAM-2 for the extracted frames
+            inference_state = self.predictor.init_state(video_path=temp_dir)
+            
+            # Use the same point that was used for motion start
+            # We need to re-establish the segmentation on the first frame of our search window
+            first_frame_path = os.path.join(temp_dir, "00000.jpeg")
+            if not os.path.exists(first_frame_path):
+                self.logger.error("First frame not found for motion end analysis")
+                return start_frame + 50
+                
+            # Get the center of the stored mask to use as point prompt
+            mask_indices = np.where(self.current_pitcher_mask)
+            if len(mask_indices[0]) == 0:
+                self.logger.error("Invalid pitcher mask for motion end analysis")
+                return start_frame + 50
+                
+            center_y = int(np.mean(mask_indices[0]))
+            center_x = int(np.mean(mask_indices[1]))
+            center_point = np.array([[center_x, center_y]], dtype=np.float32)
+            point_labels = np.array([1], dtype=np.int32)
+
+            # Initialize segmentation on first frame of search window
+            _, _, mask_logits = self.predictor.add_new_points(
+                inference_state=inference_state,
+                frame_idx=0,
+                obj_id=1,
+                points=center_point,
+                labels=point_labels,
+            )
+            
+            prev_mask = (mask_logits > 0.0).cpu().numpy().squeeze()
+            
+            # Track IoU stability to find motion end
+            iou_scores = []
+            stable_frame_count = 0
+            motion_end_frame = -1
+            
+            self.logger.info("Tracking pitcher segmentation to find motion stabilization...")
+            
+            for frame_idx, _, mask_logits in self.predictor.propagate_in_video(inference_state):
+                current_mask = (mask_logits > 0.0).cpu().numpy().squeeze()
+                iou = self._calculate_iou(prev_mask, current_mask)
+                actual_frame = start_frame + frame_idx
+                iou_scores.append((actual_frame, iou))
+                
+                if self.verbose:
+                    self.logger.info(f"Frame {actual_frame}: IoU = {iou:.4f}, Stable count = {stable_frame_count}")
+                
+                # Check for stability
+                if iou >= stabilization_threshold:
+                    stable_frame_count += 1
+                    
+                    # Check if we've reached minimum stable frames
+                    if stable_frame_count >= min_stable_frames and motion_end_frame == -1:
+                        motion_end_frame = actual_frame - min_stable_frames + 1  # Use first stable frame
+                        self.logger.info(f"Motion end detected at frame {motion_end_frame}")
+                        self.logger.info(f"  - Stabilization achieved with {min_stable_frames} consecutive frames > {stabilization_threshold}")
+                        
+                        # Save debug frame if path provided
+                        if debug_viz_path:
+                            frame_path = os.path.join(temp_dir, f"{frame_idx:05d}.jpeg")
+                            if os.path.exists(frame_path):
+                                frame = cv2.imread(frame_path)
+                                annotated_frame = sv.MaskAnnotator(color_lookup=sv.ColorLookup.INDEX).annotate(
+                                    scene=frame.copy(), 
+                                    detections=sv.Detections(
+                                        xyxy=sv.mask_to_xyxy(masks=np.array([current_mask])), 
+                                        mask=np.array([current_mask])
+                                    )
+                                )
+                                cv2.putText(annotated_frame, f"MOTION END! Frame {motion_end_frame}", 
+                                          (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
+                                cv2.putText(annotated_frame, f"IoU: {iou:.3f} ({stable_frame_count} stable)", 
+                                          (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                                cv2.imwrite(os.path.join(debug_viz_path, "motion_end_frame.jpg"), annotated_frame)
+                        
+                        break  # Found motion end, stop searching
                 else:
-                    # Fallback: check if ball is outside pitcher bounding box
-                    if pitcher_box:
-                        is_outside_pitcher = not (pitcher_box[0] <= current_ball_pos[0] <= pitcher_box[2] and
-                                                pitcher_box[1] <= current_ball_pos[1] <= pitcher_box[3])
-                    else:
-                        is_outside_pitcher = True  # Assume outside if no reference
+                    # Reset stable count if IoU drops
+                    stable_frame_count = 0
                 
-                # Update tracking state
-                consecutive_detections += 1
-                if is_outside_pitcher:
-                    frames_outside_pitcher += 1
-                else:
-                    frames_outside_pitcher = 0  # Reset if ball goes back inside
+                prev_mask = current_mask
                 
-                ball_positions.append((frame_idx, current_ball_pos, is_outside_pitcher))
+                # Stop if we've searched the full window
+                if frame_idx >= search_window - 1:
+                    break
+            
+            # Save debug visualizations
+            if debug_viz_path and iou_scores:
+                frames, ious = zip(*iou_scores)
+                plt.figure(figsize=(12, 6))
+                plt.plot(frames, ious, marker='o', linestyle='-', markersize=3, label='IoU')
+                plt.axhline(y=stabilization_threshold, color='r', linestyle='--', 
+                           label=f'Stabilization Threshold ({stabilization_threshold})')
+                plt.axvline(x=start_frame, color='g', linestyle='--', alpha=0.7, 
+                           label=f'Motion Start (Frame {start_frame})')
                 
-                # Check for ball release conditions
-                if (consecutive_detections >= min_consecutive_detections and 
-                    frames_outside_pitcher >= min_frames_outside_pitcher):
-                    
-                    self.logger.info(f"Ball release detected at frame {frame_idx}")
-                    self.logger.info(f"  - Consecutive detections: {consecutive_detections}")
-                    self.logger.info(f"  - Frames outside pitcher: {frames_outside_pitcher}")
-                    
-                    # Save debug frame if path provided
-                    if debug_viz_path:
-                        debug_frame = frame.copy()
-                        box = best_ball['box']
-                        cv2.rectangle(debug_frame, (int(box[0]), int(box[1])), 
-                                    (int(box[2]), int(box[3])), (0, 0, 255), 3)
-                        cv2.putText(debug_frame, f"RELEASE! Frame {frame_idx}", 
-                                  (int(box[0]), int(box[1]-10)), cv2.FONT_HERSHEY_SIMPLEX, 
-                                  0.7, (0, 0, 255), 2)
-                        cv2.putText(debug_frame, f"Consecutive: {consecutive_detections}", 
-                                  (int(box[0]), int(box[1]-30)), cv2.FONT_HERSHEY_SIMPLEX, 
-                                  0.5, (0, 0, 255), 1)
-                        cv2.putText(debug_frame, f"Outside: {frames_outside_pitcher}", 
-                                  (int(box[0]), int(box[1]-50)), cv2.FONT_HERSHEY_SIMPLEX, 
-                                  0.5, (0, 0, 255), 1)
-                        cv2.imwrite(os.path.join(debug_viz_path, "ball_release_frame.jpg"), debug_frame)
-                    
-                    cap.release()
-                    return frame_idx
-                    
-            else:
-                # No ball detected, reset consecutive counter
-                consecutive_detections = 0
-                frames_outside_pitcher = 0
+                if motion_end_frame != -1:
+                    plt.axvline(x=motion_end_frame, color='orange', linestyle='--', 
+                               label=f'Motion End (Frame {motion_end_frame})')
+                    # Shade the stable region
+                    stable_start = motion_end_frame
+                    stable_end = min(motion_end_frame + min_stable_frames, frames[-1])
+                    plt.axvspan(stable_start, stable_end, alpha=0.2, color='orange', 
+                               label='Stable Region')
+                
+                plt.title("Pitcher Motion End Detection via Segmentation Stabilization")
+                plt.xlabel("Frame Index")
+                plt.ylabel("Intersection over Union (IoU)")
+                plt.legend()
+                plt.grid(True, alpha=0.3)
+                plt.tight_layout()
+                plt.savefig(os.path.join(debug_viz_path, "motion_end_analysis.png"), dpi=150)
+                plt.close()
+            
+            if motion_end_frame != -1:
+                return motion_end_frame
+                
+            # If no stable region found, estimate based on search
+            estimated_end = start_frame + search_window // 2
+            self.logger.warning(f"No stable motion end detected, estimating frame {estimated_end}")
+            return estimated_end
+            
+        finally:
+            shutil.rmtree(temp_dir)
+            self.logger.info(f"Cleaned up temporary directory: {temp_dir}")
 
-            # Store detection history for debugging
-            detection_history.append({
-                'frame': frame_idx,
-                'detected': current_ball_pos is not None,
-                'outside_pitcher': is_outside_pitcher,
-                'consecutive': consecutive_detections,
-                'outside_count': frames_outside_pitcher
-            })
-
-            # Store debug frame
-            if debug_viz_path:
-                debug_frame = frame.copy()
-                if current_ball_pos is not None:
-                    color = (0, 255, 0) if is_outside_pitcher else (0, 255, 255)  # Green if outside, yellow if inside
-                    cv2.circle(debug_frame, (int(current_ball_pos[0]), int(current_ball_pos[1])), 
-                             5, color, -1)
-                    cv2.putText(debug_frame, f"Det:{consecutive_detections} Out:{frames_outside_pitcher}", 
-                              (int(current_ball_pos[0]+10), int(current_ball_pos[1])), 
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
-                debug_frames.append(debug_frame)
-
-            frame_idx += 1
-            
-            # Stop searching after reasonable number of frames
-            if frame_idx > start_frame + 150:
-                self.logger.warning("Ball release not detected within 150 frames of motion start.")
-                break
-        
-        cap.release()
-        
-        # Save debug visualizations
-        if debug_viz_path and detection_history:
-            # Plot detection history
-            frames = [d['frame'] for d in detection_history]
-            detected = [1 if d['detected'] else 0 for d in detection_history]
-            outside = [1 if d['outside_pitcher'] else 0 for d in detection_history]
-            consecutive = [d['consecutive'] for d in detection_history]
-            
-            fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 8))
-            
-            # Detection status
-            ax1.plot(frames, detected, 'bo-', markersize=3, label='Ball Detected')
-            ax1.set_ylabel('Detected')
-            ax1.set_title('Ball Detection Status Over Time')
-            ax1.grid(True, alpha=0.3)
-            ax1.legend()
-            
-            # Outside pitcher status
-            ax2.plot(frames, outside, 'ro-', markersize=3, label='Outside Pitcher')
-            ax2.axhline(y=min_frames_outside_pitcher, color='r', linestyle='--', 
-                       label=f'Required Outside Frames ({min_frames_outside_pitcher})')
-            ax2.set_ylabel('Outside Pitcher')
-            ax2.grid(True, alpha=0.3)
-            ax2.legend()
-            
-            # Consecutive detections
-            ax3.plot(frames, consecutive, 'go-', markersize=3, label='Consecutive Detections')
-            ax3.axhline(y=min_consecutive_detections, color='g', linestyle='--', 
-                       label=f'Required Consecutive ({min_consecutive_detections})')
-            ax3.set_ylabel('Consecutive Count')
-            ax3.set_xlabel('Frame Index')
-            ax3.grid(True, alpha=0.3)
-            ax3.legend()
-            
-            plt.tight_layout()
-            plt.savefig(os.path.join(debug_viz_path, "ball_detection_analysis.png"), dpi=150)
-            plt.close()
-        
-        # Return last detected frame or estimate
-        self.logger.warning(f"Ball release detection failed, returning frame {frame_idx}")
-        return frame_idx
+    def find_ball_release_legacy(self, video_path: str, start_frame: int, pitcher_box: list = None, 
+                         min_consecutive_detections: int = 3, min_frames_outside_pitcher: int = 2,
+                         debug_viz_path: str = None) -> int:
 
     def trim_pitching_motion(self, video_path: str, output_path: str, pitcher_box: list = None, 
                            end_frame_offset: int = 15, debug_viz_path: str = None,
@@ -571,15 +566,14 @@ class PitchMotionAnalyzer:
             create_overlay_video=create_overlay_video
         )
         
-        # Find ball release using robust detection
-        release_frame = self.find_ball_release(
+        # Find motion end using segmentation stabilization
+        motion_end_frame = self.find_motion_end_by_segmentation(
             video_path=video_path, 
-            start_frame=start_frame, 
-            pitcher_box=pitcher_box,
+            start_frame=start_frame,
             debug_viz_path=debug_viz_path
         )
         
-        end_frame = release_frame + end_frame_offset
+        end_frame = motion_end_frame + end_frame_offset
         
         # Trim the video
         cap = cv2.VideoCapture(video_path)
@@ -619,7 +613,7 @@ class PitchMotionAnalyzer:
         if debug_viz_path:
             summary = {
                 'start_frame': start_frame,
-                'release_frame': release_frame,
+                'motion_end_frame': motion_end_frame,
                 'end_frame': end_frame,
                 'total_frames': frames_written,
                 'duration_seconds': frames_written / fps

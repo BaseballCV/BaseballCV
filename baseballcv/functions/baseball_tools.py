@@ -507,16 +507,16 @@ class BaseballTools:
                             create_debug_visuals: bool = False,
                             create_overlay_video: bool = True,
                             iou_threshold: float = 0.95,
-                            min_consecutive_detections: int = 3,
-                            min_frames_outside_pitcher: int = 2,
+                            stabilization_threshold: float = 0.96,
+                            min_stable_frames: int = 5,
                             max_detection_frames: int = 30):
         """
-        Analyzes a video to trim it to the pitcher's motion using SAM-2 and object detection.
+        Analyzes a video to trim it to the pitcher's motion using SAM-2 segmentation.
         
         This method uses computer vision to automatically detect:
         1. The pitcher (using PHC detector across multiple frames if needed)
         2. The start of pitching motion (using SAM-2 segmentation and IoU tracking)
-        3. Ball release point (using robust ball detection outside pitcher mask)
+        3. The end of pitching motion (using SAM-2 segmentation stabilization in follow-through)
         
         Args:
             video_path (str): Path to the input video file.
@@ -529,12 +529,12 @@ class BaseballTools:
             device (str, optional): Device to use for analysis ('cpu', 'cuda', 'mps'). 
                                 Uses class default if None.
             verbose (bool, optional): Enable verbose logging. Uses class default if None.
-            end_frame_offset (int): Number of frames to include after ball release. Defaults to 15.
+            end_frame_offset (int): Number of frames to include after motion end. Defaults to 15.
             create_debug_visuals (bool): Whether to create debug visualizations. Defaults to False.
             create_overlay_video (bool): Whether to create video with segmentation overlay. Defaults to True.
-            iou_threshold (float): IoU threshold for motion detection. Defaults to 0.95.
-            min_consecutive_detections (int): Minimum consecutive ball detections for release. Defaults to 3.
-            min_frames_outside_pitcher (int): Minimum frames ball must be outside pitcher. Defaults to 2.
+            iou_threshold (float): IoU threshold for motion start detection. Defaults to 0.95.
+            stabilization_threshold (float): IoU threshold for motion end detection. Defaults to 0.96.
+            min_stable_frames (int): Minimum stable frames for motion end. Defaults to 5.
             max_detection_frames (int): Maximum frames to search for pitcher. Defaults to 30.
             
         Returns:
@@ -544,7 +544,7 @@ class BaseballTools:
                 - debug_path: Path to debug visualizations (if created)
                 - message: Error message (if failed)
                 - start_frame: Frame where motion starts
-                - release_frame: Frame where ball is released
+                - motion_end_frame: Frame where motion ends (follow-through stabilization)
                 - end_frame: Final frame of trimmed video
         """
         self.logger.info(f"Initializing Enhanced Pitch Motion Trimmer for video: {video_path}")
@@ -589,8 +589,8 @@ class BaseballTools:
                 self.logger.info(f"Pitcher auto-detected in frame {pitcher_frame} with box: {pitcher_box}")
 
             # Perform the trimming analysis
-            self.logger.info("Starting enhanced pitch motion analysis...")
-            self.logger.info(f"Ball release detection: {min_consecutive_detections} consecutive detections, {min_frames_outside_pitcher} frames outside pitcher")
+            self.logger.info("Starting segmentation-based pitch motion analysis...")
+            self.logger.info(f"Motion end detection: {min_stable_frames} stable frames with IoU > {stabilization_threshold}")
             
             motion_analyzer.trim_pitching_motion(
                 video_path=video_path,
@@ -601,7 +601,7 @@ class BaseballTools:
                 create_overlay_video=create_overlay_video
             )
 
-            self.logger.info("Enhanced pitcher motion trimming complete.")
+            self.logger.info("Segmentation-based pitcher motion trimming complete.")
             
             # Prepare return data
             result = {
