@@ -75,9 +75,59 @@ class PitchMotionAnalyzer:
             return 1.0
         return np.sum(intersection) / np.sum(union)
 
+    def detect_pitcher_box_multiframe(self, video_path: str, max_frames: int = 30, conf_threshold: float = 0.5) -> tuple:
+        """
+        Detect pitcher in video by checking multiple frames until found.
+        
+        Args:
+            video_path: Path to video file
+            max_frames: Maximum number of frames to check
+            conf_threshold: Confidence threshold for detection
+            
+        Returns:
+            Tuple of (pitcher_box, frame_number) where pitcher was found, or (None, -1) if not found
+        """
+        self.logger.info(f"Searching for pitcher in first {max_frames} frames...")
+        
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            self.logger.error(f"Cannot open video: {video_path}")
+            return None, -1
+        
+        frame_idx = 0
+        while frame_idx < max_frames:
+            ret, frame = cap.read()
+            if not ret:
+                break
+                
+            results = self.pitcher_model.predict(frame, conf=conf_threshold, verbose=False)
+            
+            pitcher_detections = []
+            for result in results:
+                for box in result.boxes:
+                    if result.names[int(box.cls)] == 'pitcher':
+                        pitcher_detections.append({
+                            'box': box.xyxy[0].tolist(),
+                            'confidence': box.conf[0].item()
+                        })
+            
+            if pitcher_detections:
+                # Found pitcher! Return the most confident detection
+                pitcher_detections.sort(key=lambda x: x['confidence'], reverse=True)
+                best_detection = pitcher_detections[0]
+                cap.release()
+                self.logger.info(f"Pitcher found in frame {frame_idx} with confidence {best_detection['confidence']:.3f}")
+                return best_detection['box'], frame_idx
+            
+            frame_idx += 1
+        
+        cap.release()
+        self.logger.error(f"No pitcher detected in first {max_frames} frames")
+        return None, -1
+
     def detect_pitcher_box(self, frame: np.ndarray, conf_threshold: float = 0.5) -> list:
         """
-        Detect pitcher in the frame using the PHC detector model.
+        Detect pitcher in a single frame using the PHC detector model.
         
         Args:
             frame: Input video frame
@@ -106,7 +156,7 @@ class PitchMotionAnalyzer:
 
     def find_motion_start(self, video_path: str, initial_box: list = None, iou_threshold: float = 0.95, 
                          frame_buffer: int = 5, debug_viz_path: str = None, 
-                         create_overlay_video: bool = False) -> int:
+                         create_overlay_video: bool = True) -> int:
         """
         Find when the pitcher starts moving using SAM-2 segmentation.
         
@@ -147,14 +197,12 @@ class PitchMotionAnalyzer:
 
             self.logger.info(f"{files_written} frames extracted to temporary directory: {temp_dir}")
             
-            # Auto-detect pitcher if no box provided
+            # Auto-detect pitcher if no box provided (check multiple frames)
             if initial_box is None:
-                first_frame_path = os.path.join(temp_dir, "00000.jpeg")
-                first_frame = cv2.imread(first_frame_path)
-                initial_box = self.detect_pitcher_box(first_frame)
+                initial_box, pitcher_frame = self.detect_pitcher_box_multiframe(video_path)
                 
                 if initial_box is None:
-                    self.logger.error("Could not detect pitcher in the first frame")
+                    self.logger.error("Could not detect pitcher in any of the first frames")
                     raise ValueError("Pitcher detection failed")
                 
                 self.logger.info(f"Auto-detected pitcher box: {initial_box}")
@@ -201,6 +249,9 @@ class PitchMotionAnalyzer:
             motion_detected_frame = -1
             overlay_frames = []
             
+            # Store the current mask for ball release detection later
+            self.current_pitcher_mask = None
+            
             for frame_idx, _, mask_logits in self.predictor.propagate_in_video(inference_state):
                 current_mask = (mask_logits > 0.0).cpu().numpy().squeeze()
                 iou = self._calculate_iou(prev_mask, current_mask)
@@ -243,6 +294,9 @@ class PitchMotionAnalyzer:
                             cv2.imwrite(os.path.join(debug_viz_path, "motion_detection_frame.jpg"), annotated_frame)
                 
                 prev_mask = current_mask
+                
+                # Store the last mask for ball release detection
+                self.current_pitcher_mask = current_mask
 
             # Save overlay video if requested
             if create_overlay_video and overlay_frames and debug_viz_path:
@@ -291,32 +345,42 @@ class PitchMotionAnalyzer:
             self.logger.info(f"Cleaned up temporary directory: {temp_dir}")
 
     def find_ball_release(self, video_path: str, start_frame: int, pitcher_box: list = None, 
-                         velocity_threshold: float = 30.0, debug_viz_path: str = None) -> int:
+                         min_consecutive_detections: int = 3, min_frames_outside_pitcher: int = 2,
+                         debug_viz_path: str = None) -> int:
         """
-        Find when the ball is released by tracking ball movement.
+        Find when the ball is released using robust detection criteria:
+        1. Ball must be consistently detected for several frames
+        2. Ball must be outside the pitcher's segmentation mask
+        3. This provides much more reliable detection than velocity alone
         
         Args:
             video_path: Path to the video file
             start_frame: Frame to start looking for ball release
             pitcher_box: Bounding box of pitcher (for filtering detections)
-            velocity_threshold: Minimum velocity to consider as ball release
+            min_consecutive_detections: Minimum consecutive frames ball must be detected
+            min_frames_outside_pitcher: Minimum frames ball must be outside pitcher mask
             debug_viz_path: Path to save debug visualizations
             
         Returns:
             Frame index where ball release occurs
         """
         self.logger.info(f"Analyzing video to find ball release starting from frame {start_frame}...")
+        self.logger.info(f"Using robust detection: {min_consecutive_detections} consecutive detections, {min_frames_outside_pitcher} frames outside pitcher")
+        
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             self.logger.error(f"Cannot open video: {video_path}")
             return start_frame + 50
 
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-        last_ball_pos = None
         frame_idx = start_frame
-        velocity_history = []
+        
+        # Track ball detection state
+        consecutive_detections = 0
+        frames_outside_pitcher = 0
         ball_positions = []
-
+        detection_history = []
+        
         # Get video properties for debug video
         fps = cap.get(cv2.CAP_PROP_FPS)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -339,57 +403,99 @@ class PitchMotionAnalyzer:
                 if label == 'baseball':
                     ball_detections.append({
                         'box': box.xyxy[0].tolist(), 
-                        'confidence': box.conf[0].item()
+                        'confidence': box.conf[0].item(),
+                        'center': [(box.xyxy[0][0] + box.xyxy[0][2]) / 2, 
+                                  (box.xyxy[0][1] + box.xyxy[0][3]) / 2]
                     })
 
-            current_velocity = 0
             current_ball_pos = None
+            is_outside_pitcher = False
             
             if ball_detections:
                 # Use the most confident detection
                 ball_detections.sort(key=lambda x: x['confidence'], reverse=True)
-                box = ball_detections[0]['box']
-                current_ball_pos = np.array([(box[0] + box[2]) / 2, (box[1] + box[3]) / 2])
-                ball_positions.append((frame_idx, current_ball_pos))
-
-                if last_ball_pos is not None:
-                    current_velocity = np.linalg.norm(current_ball_pos - last_ball_pos)
-                    velocity_history.append((frame_idx, current_velocity))
-                    
-                    if self.verbose:
-                        self.logger.info(f"Frame {frame_idx}: Ball velocity: {current_velocity:.2f} pixels/frame")
-                    
-                    # Check for ball release (high velocity)
-                    if current_velocity > velocity_threshold:
-                        self.logger.info(f"Ball release detected at frame {frame_idx} with velocity {current_velocity:.2f}")
-                        
-                        # Save debug frame if path provided
-                        if debug_viz_path:
-                            debug_frame = frame.copy()
-                            cv2.rectangle(debug_frame, (int(box[0]), int(box[1])), 
-                                        (int(box[2]), int(box[3])), (0, 0, 255), 3)
-                            cv2.putText(debug_frame, f"RELEASE! V={current_velocity:.1f}", 
-                                      (int(box[0]), int(box[1]-10)), cv2.FONT_HERSHEY_SIMPLEX, 
-                                      0.7, (0, 0, 255), 2)
-                            cv2.imwrite(os.path.join(debug_viz_path, "ball_release_frame.jpg"), debug_frame)
-                        
-                        cap.release()
-                        return frame_idx
+                best_ball = ball_detections[0]
+                current_ball_pos = best_ball['center']
                 
-                last_ball_pos = current_ball_pos
+                # Check if ball is outside pitcher mask (if we have one)
+                if hasattr(self, 'current_pitcher_mask') and self.current_pitcher_mask is not None:
+                    ball_x, ball_y = int(current_ball_pos[0]), int(current_ball_pos[1])
+                    
+                    # Check if ball center is outside the pitcher mask
+                    if (0 <= ball_x < self.current_pitcher_mask.shape[1] and 
+                        0 <= ball_y < self.current_pitcher_mask.shape[0]):
+                        is_outside_pitcher = not self.current_pitcher_mask[ball_y, ball_x]
+                    else:
+                        is_outside_pitcher = True  # Ball is outside frame bounds
+                else:
+                    # Fallback: check if ball is outside pitcher bounding box
+                    if pitcher_box:
+                        is_outside_pitcher = not (pitcher_box[0] <= current_ball_pos[0] <= pitcher_box[2] and
+                                                pitcher_box[1] <= current_ball_pos[1] <= pitcher_box[3])
+                    else:
+                        is_outside_pitcher = True  # Assume outside if no reference
+                
+                # Update tracking state
+                consecutive_detections += 1
+                if is_outside_pitcher:
+                    frames_outside_pitcher += 1
+                else:
+                    frames_outside_pitcher = 0  # Reset if ball goes back inside
+                
+                ball_positions.append((frame_idx, current_ball_pos, is_outside_pitcher))
+                
+                # Check for ball release conditions
+                if (consecutive_detections >= min_consecutive_detections and 
+                    frames_outside_pitcher >= min_frames_outside_pitcher):
+                    
+                    self.logger.info(f"Ball release detected at frame {frame_idx}")
+                    self.logger.info(f"  - Consecutive detections: {consecutive_detections}")
+                    self.logger.info(f"  - Frames outside pitcher: {frames_outside_pitcher}")
+                    
+                    # Save debug frame if path provided
+                    if debug_viz_path:
+                        debug_frame = frame.copy()
+                        box = best_ball['box']
+                        cv2.rectangle(debug_frame, (int(box[0]), int(box[1])), 
+                                    (int(box[2]), int(box[3])), (0, 0, 255), 3)
+                        cv2.putText(debug_frame, f"RELEASE! Frame {frame_idx}", 
+                                  (int(box[0]), int(box[1]-10)), cv2.FONT_HERSHEY_SIMPLEX, 
+                                  0.7, (0, 0, 255), 2)
+                        cv2.putText(debug_frame, f"Consecutive: {consecutive_detections}", 
+                                  (int(box[0]), int(box[1]-30)), cv2.FONT_HERSHEY_SIMPLEX, 
+                                  0.5, (0, 0, 255), 1)
+                        cv2.putText(debug_frame, f"Outside: {frames_outside_pitcher}", 
+                                  (int(box[0]), int(box[1]-50)), cv2.FONT_HERSHEY_SIMPLEX, 
+                                  0.5, (0, 0, 255), 1)
+                        cv2.imwrite(os.path.join(debug_viz_path, "ball_release_frame.jpg"), debug_frame)
+                    
+                    cap.release()
+                    return frame_idx
+                    
             else:
-                # No ball detected, keep last position
-                pass
+                # No ball detected, reset consecutive counter
+                consecutive_detections = 0
+                frames_outside_pitcher = 0
+
+            # Store detection history for debugging
+            detection_history.append({
+                'frame': frame_idx,
+                'detected': current_ball_pos is not None,
+                'outside_pitcher': is_outside_pitcher,
+                'consecutive': consecutive_detections,
+                'outside_count': frames_outside_pitcher
+            })
 
             # Store debug frame
             if debug_viz_path:
                 debug_frame = frame.copy()
                 if current_ball_pos is not None:
+                    color = (0, 255, 0) if is_outside_pitcher else (0, 255, 255)  # Green if outside, yellow if inside
                     cv2.circle(debug_frame, (int(current_ball_pos[0]), int(current_ball_pos[1])), 
-                             5, (0, 255, 0), -1)
-                    cv2.putText(debug_frame, f"V={current_velocity:.1f}", 
+                             5, color, -1)
+                    cv2.putText(debug_frame, f"Det:{consecutive_detections} Out:{frames_outside_pitcher}", 
                               (int(current_ball_pos[0]+10), int(current_ball_pos[1])), 
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
                 debug_frames.append(debug_frame)
 
             frame_idx += 1
@@ -402,28 +508,50 @@ class PitchMotionAnalyzer:
         cap.release()
         
         # Save debug visualizations
-        if debug_viz_path and velocity_history:
-            # Plot velocity over time
-            frames, velocities = zip(*velocity_history)
-            plt.figure(figsize=(12, 6))
-            plt.plot(frames, velocities, marker='o', linestyle='-', markersize=3)
-            plt.axhline(y=velocity_threshold, color='r', linestyle='--', 
-                       label=f'Release Threshold ({velocity_threshold})')
-            plt.title("Ball Velocity Over Time")
-            plt.xlabel("Frame Index")
-            plt.ylabel("Ball Velocity (pixels/frame)")
-            plt.legend()
-            plt.grid(True, alpha=0.3)
+        if debug_viz_path and detection_history:
+            # Plot detection history
+            frames = [d['frame'] for d in detection_history]
+            detected = [1 if d['detected'] else 0 for d in detection_history]
+            outside = [1 if d['outside_pitcher'] else 0 for d in detection_history]
+            consecutive = [d['consecutive'] for d in detection_history]
+            
+            fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 8))
+            
+            # Detection status
+            ax1.plot(frames, detected, 'bo-', markersize=3, label='Ball Detected')
+            ax1.set_ylabel('Detected')
+            ax1.set_title('Ball Detection Status Over Time')
+            ax1.grid(True, alpha=0.3)
+            ax1.legend()
+            
+            # Outside pitcher status
+            ax2.plot(frames, outside, 'ro-', markersize=3, label='Outside Pitcher')
+            ax2.axhline(y=min_frames_outside_pitcher, color='r', linestyle='--', 
+                       label=f'Required Outside Frames ({min_frames_outside_pitcher})')
+            ax2.set_ylabel('Outside Pitcher')
+            ax2.grid(True, alpha=0.3)
+            ax2.legend()
+            
+            # Consecutive detections
+            ax3.plot(frames, consecutive, 'go-', markersize=3, label='Consecutive Detections')
+            ax3.axhline(y=min_consecutive_detections, color='g', linestyle='--', 
+                       label=f'Required Consecutive ({min_consecutive_detections})')
+            ax3.set_ylabel('Consecutive Count')
+            ax3.set_xlabel('Frame Index')
+            ax3.grid(True, alpha=0.3)
+            ax3.legend()
+            
             plt.tight_layout()
-            plt.savefig(os.path.join(debug_viz_path, "ball_velocity_plot.png"), dpi=150)
+            plt.savefig(os.path.join(debug_viz_path, "ball_detection_analysis.png"), dpi=150)
             plt.close()
         
         # Return last detected frame or estimate
+        self.logger.warning(f"Ball release detection failed, returning frame {frame_idx}")
         return frame_idx
 
     def trim_pitching_motion(self, video_path: str, output_path: str, pitcher_box: list = None, 
                            end_frame_offset: int = 15, debug_viz_path: str = None,
-                           create_overlay_video: bool = False):
+                           create_overlay_video: bool = True):
         """
         Trim video to contain only the pitching motion.
         
@@ -443,7 +571,7 @@ class PitchMotionAnalyzer:
             create_overlay_video=create_overlay_video
         )
         
-        # Find ball release
+        # Find ball release using robust detection
         release_frame = self.find_ball_release(
             video_path=video_path, 
             start_frame=start_frame, 

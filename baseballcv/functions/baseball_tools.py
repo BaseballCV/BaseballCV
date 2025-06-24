@@ -493,7 +493,7 @@ class BaseballTools:
             self.logger.warning("Could not calculate aggregate command metrics.")
 
         return results_df
-    
+        
     def trim_pitcher_video(self, 
                             video_path: str, 
                             output_path: str, 
@@ -505,16 +505,18 @@ class BaseballTools:
                             verbose: bool = None,
                             end_frame_offset: int = 15,
                             create_debug_visuals: bool = False,
-                            create_overlay_video: bool = False,
+                            create_overlay_video: bool = True,
                             iou_threshold: float = 0.95,
-                            velocity_threshold: float = 30.0):
+                            min_consecutive_detections: int = 3,
+                            min_frames_outside_pitcher: int = 2,
+                            max_detection_frames: int = 30):
         """
         Analyzes a video to trim it to the pitcher's motion using SAM-2 and object detection.
         
         This method uses computer vision to automatically detect:
-        1. The pitcher (using PHC detector if no bounding box provided)
+        1. The pitcher (using PHC detector across multiple frames if needed)
         2. The start of pitching motion (using SAM-2 segmentation and IoU tracking)
-        3. Ball release point (using ball detection and velocity analysis)
+        3. Ball release point (using robust ball detection outside pitcher mask)
         
         Args:
             video_path (str): Path to the input video file.
@@ -529,9 +531,11 @@ class BaseballTools:
             verbose (bool, optional): Enable verbose logging. Uses class default if None.
             end_frame_offset (int): Number of frames to include after ball release. Defaults to 15.
             create_debug_visuals (bool): Whether to create debug visualizations. Defaults to False.
-            create_overlay_video (bool): Whether to create video with segmentation overlay. Defaults to False.
+            create_overlay_video (bool): Whether to create video with segmentation overlay. Defaults to True.
             iou_threshold (float): IoU threshold for motion detection. Defaults to 0.95.
-            velocity_threshold (float): Velocity threshold for ball release detection. Defaults to 30.0.
+            min_consecutive_detections (int): Minimum consecutive ball detections for release. Defaults to 3.
+            min_frames_outside_pitcher (int): Minimum frames ball must be outside pitcher. Defaults to 2.
+            max_detection_frames (int): Maximum frames to search for pitcher. Defaults to 30.
             
         Returns:
             dict: Results containing:
@@ -543,7 +547,7 @@ class BaseballTools:
                 - release_frame: Frame where ball is released
                 - end_frame: Final frame of trimmed video
         """
-        self.logger.info(f"Initializing Pitch Motion Trimmer for video: {video_path}")
+        self.logger.info(f"Initializing Enhanced Pitch Motion Trimmer for video: {video_path}")
         
         # Setup debug directory if requested
         debug_viz_path = None
@@ -558,48 +562,7 @@ class BaseballTools:
             analysis_device = device if device else self.device
             analysis_verbose = verbose if verbose is not None else self.verbose
             
-            # Auto-detect pitcher if no box provided
-            if pitcher_box is None:
-                self.logger.info(f"Pitcher box not provided. Detecting pitcher using '{pitcher_detector_model}'.")
-                
-                # Read first frame to detect pitcher
-                cap = cv2.VideoCapture(video_path)
-                ret, frame = cap.read()
-                cap.release()
-                
-                if not ret:
-                    error_msg = "Could not read the first frame of the video."
-                    self.logger.error(error_msg)
-                    return {"status": "error", "message": error_msg}
-
-                # Load pitcher detector and find pitcher
-                from baseballcv.functions.load_tools import LoadTools
-                load_tools = LoadTools()
-                pitcher_detector_path = load_tools.load_model(pitcher_detector_model)
-                
-                from ultralytics import YOLO
-                pitcher_detector = YOLO(pitcher_detector_path)
-                detections = pitcher_detector.predict(frame, verbose=False)[0]
-
-                pitcher_detections = []
-                for box in detections.boxes:
-                    if detections.names[int(box.cls)] == 'pitcher':
-                        pitcher_detections.append({
-                            'box': box.xyxy[0].tolist(),
-                            'confidence': box.conf[0].item()
-                        })
-
-                if not pitcher_detections:
-                    error_msg = "No pitcher detected in the first frame."
-                    self.logger.error(error_msg)
-                    return {"status": "error", "message": error_msg}
-
-                # Use most confident detection
-                pitcher_detections.sort(key=lambda x: x['confidence'], reverse=True)
-                pitcher_box = pitcher_detections[0]['box']
-                self.logger.info(f"Pitcher detected with box: {pitcher_box} (confidence: {pitcher_detections[0]['confidence']:.3f})")
-
-            # Initialize motion analyzer
+            # Initialize motion analyzer first to get access to multi-frame detection
             motion_analyzer = PitchMotionAnalyzer(
                 model_config=model_config,
                 model_checkpoint=model_checkpoint,
@@ -608,9 +571,27 @@ class BaseballTools:
                 device=analysis_device,
                 verbose=analysis_verbose
             )
+            
+            # Auto-detect pitcher if no box provided (check multiple frames)
+            if pitcher_box is None:
+                self.logger.info(f"Pitcher box not provided. Detecting pitcher using '{pitcher_detector_model}' across multiple frames.")
+                
+                pitcher_box, pitcher_frame = motion_analyzer.detect_pitcher_box_multiframe(
+                    video_path, 
+                    max_frames=max_detection_frames
+                )
+                
+                if pitcher_box is None:
+                    error_msg = f"No pitcher detected in first {max_detection_frames} frames. Try a different video or adjust detection parameters."
+                    self.logger.error(error_msg)
+                    return {"status": "error", "message": error_msg}
+
+                self.logger.info(f"Pitcher auto-detected in frame {pitcher_frame} with box: {pitcher_box}")
 
             # Perform the trimming analysis
-            self.logger.info("Starting pitch motion analysis...")
+            self.logger.info("Starting enhanced pitch motion analysis...")
+            self.logger.info(f"Ball release detection: {min_consecutive_detections} consecutive detections, {min_frames_outside_pitcher} frames outside pitcher")
+            
             motion_analyzer.trim_pitching_motion(
                 video_path=video_path,
                 output_path=output_path,
@@ -620,7 +601,7 @@ class BaseballTools:
                 create_overlay_video=create_overlay_video
             )
 
-            self.logger.info("Pitcher motion trimming complete.")
+            self.logger.info("Enhanced pitcher motion trimming complete.")
             
             # Prepare return data
             result = {
@@ -641,7 +622,10 @@ class BaseballTools:
                                     try:
                                         result[key.strip()] = int(value.strip())
                                     except ValueError:
-                                        result[key.strip()] = value.strip()
+                                        try:
+                                            result[key.strip()] = float(value.strip())
+                                        except ValueError:
+                                            result[key.strip()] = value.strip()
                     except Exception as e:
                         self.logger.warning(f"Could not read summary file: {e}")
             
