@@ -108,7 +108,14 @@ class PitchMotionAnalyzer:
                 frame_zero_path = os.path.join(temp_dir, "00000.jpeg")
                 if os.path.exists(frame_zero_path):
                     frame_zero = cv2.imread(frame_zero_path)
-                    annotated_frame = sv.MaskAnnotator().annotate(scene=frame_zero.copy(), detections=sv.Detections(xyxy=sv.mask_to_xyxy(masks=np.array([prev_mask])), mask=np.array([prev_mask])))
+                    # Fix: Add color_lookup parameter to avoid class_id requirement
+                    annotated_frame = sv.MaskAnnotator(color_lookup=sv.ColorLookup.INDEX).annotate(
+                        scene=frame_zero.copy(), 
+                        detections=sv.Detections(
+                            xyxy=sv.mask_to_xyxy(masks=np.array([prev_mask])), 
+                            mask=np.array([prev_mask])
+                        )
+                    )
                     cv2.circle(annotated_frame, (int(top_left_point[0][0]), int(top_left_point[0][1])), 5, (0, 0, 255), -1)
                     cv2.imwrite(os.path.join(debug_viz_path, "initial_mask.jpg"), annotated_frame)
 
@@ -131,7 +138,14 @@ class PitchMotionAnalyzer:
                         frame_path = os.path.join(temp_dir, f"{frame_idx:05d}.jpeg")
                         if os.path.exists(frame_path):
                             frame = cv2.imread(frame_path)
-                            annotated_frame = sv.MaskAnnotator().annotate(scene=frame.copy(), detections=sv.Detections(xyxy=sv.mask_to_xyxy(masks=np.array([current_mask])), mask=np.array([current_mask])))
+                            # Fix: Add color_lookup parameter to avoid class_id requirement
+                            annotated_frame = sv.MaskAnnotator(color_lookup=sv.ColorLookup.INDEX).annotate(
+                                scene=frame.copy(), 
+                                detections=sv.Detections(
+                                    xyxy=sv.mask_to_xyxy(masks=np.array([current_mask])), 
+                                    mask=np.array([current_mask])
+                                )
+                            )
                             cv2.imwrite(os.path.join(debug_viz_path, "motion_detection_frame.jpg"), annotated_frame)
                 
                 prev_mask = current_mask
