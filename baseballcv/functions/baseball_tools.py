@@ -498,86 +498,156 @@ class BaseballTools:
                             video_path: str, 
                             output_path: str, 
                             pitcher_box: list = None,
-                            pitcher_detector_model: str = 'pitcher_hitter_catcher_detector',
+                            pitcher_detector_model: str = 'phc_detector',
                             model_config: str = 'models/segmentation/sam2/sam2_hiera_t.yaml', 
                             model_checkpoint: str = 'models/segmentation/sam2/sam2_hiera_tiny.pt',
                             device: str = None,
-                            verbose: bool = False,
+                            verbose: bool = None,
                             end_frame_offset: int = 15,
-                            create_debug_visuals: bool = False):
+                            create_debug_visuals: bool = False,
+                            create_overlay_video: bool = False,
+                            iou_threshold: float = 0.95,
+                            velocity_threshold: float = 30.0):
         """
-        Analyzes a video to trim it to the pitcher's motion using SAM-2.
-        If pitcher_box is not provided, it will use an object detector to find the pitcher.
-
+        Analyzes a video to trim it to the pitcher's motion using SAM-2 and object detection.
+        
+        This method uses computer vision to automatically detect:
+        1. The pitcher (using PHC detector if no bounding box provided)
+        2. The start of pitching motion (using SAM-2 segmentation and IoU tracking)
+        3. Ball release point (using ball detection and velocity analysis)
+        
         Args:
             video_path (str): Path to the input video file.
             output_path (str): Path to save the trimmed video file.
-            pitcher_box (list, optional): A bounding box [x1, y1, x2, y2] for the pitcher. Defaults to None.
-            pitcher_detector_model (str, optional): Model alias for the pitcher detector. Defaults to 'pitcher_hitter_catcher_detector'.
-            model_config (str, optional): Path to the SAM-2 model config file.
-            model_checkpoint (str, optional): Path to the SAM-2 model checkpoint file.
-            device (str, optional): Device to use for analysis (e.g., 'cpu', 'cuda').
-            verbose (bool, optional): Enable verbose logging.
-            end_frame_offset (int, optional): Number of frames to include after ball release. Defaults to 15.
-            create_debug_visuals (bool, optional): Whether to create debug visualizations. Defaults to False.
+            pitcher_box (list, optional): Bounding box [x1, y1, x2, y2] for the pitcher. 
+                                        If None, will auto-detect using pitcher_detector_model.
+            pitcher_detector_model (str): Model alias for pitcher detection. Defaults to 'phc_detector'.
+            model_config (str): Path to the SAM-2 model config file.
+            model_checkpoint (str): Path to the SAM-2 model checkpoint file.
+            device (str, optional): Device to use for analysis ('cpu', 'cuda', 'mps'). 
+                                Uses class default if None.
+            verbose (bool, optional): Enable verbose logging. Uses class default if None.
+            end_frame_offset (int): Number of frames to include after ball release. Defaults to 15.
+            create_debug_visuals (bool): Whether to create debug visualizations. Defaults to False.
+            create_overlay_video (bool): Whether to create video with segmentation overlay. Defaults to False.
+            iou_threshold (float): IoU threshold for motion detection. Defaults to 0.95.
+            velocity_threshold (float): Velocity threshold for ball release detection. Defaults to 30.0.
+            
+        Returns:
+            dict: Results containing:
+                - status: 'success' or 'error'
+                - output_path: Path to trimmed video (if successful)
+                - debug_path: Path to debug visualizations (if created)
+                - message: Error message (if failed)
+                - start_frame: Frame where motion starts
+                - release_frame: Frame where ball is released
+                - end_frame: Final frame of trimmed video
         """
         self.logger.info(f"Initializing Pitch Motion Trimmer for video: {video_path}")
+        
+        # Setup debug directory if requested
         debug_viz_path = None
         if create_debug_visuals:
-            # Create a unique directory for the debug visuals for this run
             video_name = os.path.splitext(os.path.basename(video_path))[0]
             debug_viz_path = os.path.join(os.path.dirname(output_path), f"debug_visuals_{video_name}")
             os.makedirs(debug_viz_path, exist_ok=True)
             self.logger.info(f"Debug visuals will be saved to: {debug_viz_path}")
 
         try:
+            # Use method parameters or fall back to class defaults
+            analysis_device = device if device else self.device
+            analysis_verbose = verbose if verbose is not None else self.verbose
+            
+            # Auto-detect pitcher if no box provided
             if pitcher_box is None:
                 self.logger.info(f"Pitcher box not provided. Detecting pitcher using '{pitcher_detector_model}'.")
-
+                
+                # Read first frame to detect pitcher
                 cap = cv2.VideoCapture(video_path)
                 ret, frame = cap.read()
                 cap.release()
+                
                 if not ret:
-                    self.logger.error("Could not read the first frame of the video.")
-                    return {"status": "error", "message": "Could not read video frame."}
+                    error_msg = "Could not read the first frame of the video."
+                    self.logger.error(error_msg)
+                    return {"status": "error", "message": error_msg}
 
-                pitcher_detector = YOLO(pitcher_detector_model)
+                # Load pitcher detector and find pitcher
+                from baseballcv.functions.load_tools import LoadTools
+                load_tools = LoadTools()
+                pitcher_detector_path = load_tools.load_model(pitcher_detector_model)
+                
+                from ultralytics import YOLO
+                pitcher_detector = YOLO(pitcher_detector_path)
                 detections = pitcher_detector.predict(frame, verbose=False)[0]
 
                 pitcher_detections = []
                 for box in detections.boxes:
                     if detections.names[int(box.cls)] == 'pitcher':
-                         pitcher_detections.append({
-                             'box': box.xyxy[0].tolist(),
-                             'confidence': box.conf[0].item()
-                         })
+                        pitcher_detections.append({
+                            'box': box.xyxy[0].tolist(),
+                            'confidence': box.conf[0].item()
+                        })
 
                 if not pitcher_detections:
-                    self.logger.error("No pitcher detected in the first frame.")
-                    return {"status": "error", "message": "No pitcher detected."}
+                    error_msg = "No pitcher detected in the first frame."
+                    self.logger.error(error_msg)
+                    return {"status": "error", "message": error_msg}
 
+                # Use most confident detection
                 pitcher_detections.sort(key=lambda x: x['confidence'], reverse=True)
                 pitcher_box = pitcher_detections[0]['box']
-                self.logger.info(f"Pitcher detected with box: {pitcher_box}")
+                self.logger.info(f"Pitcher detected with box: {pitcher_box} (confidence: {pitcher_detections[0]['confidence']:.3f})")
 
+            # Initialize motion analyzer
             motion_analyzer = PitchMotionAnalyzer(
                 model_config=model_config,
                 model_checkpoint=model_checkpoint,
                 ball_model_path='ball_trackingv4',
-                device=device if device else self.device,
-                verbose=verbose if verbose else self.verbose
+                pitcher_detector_model=pitcher_detector_model,
+                device=analysis_device,
+                verbose=analysis_verbose
             )
 
+            # Perform the trimming analysis
+            self.logger.info("Starting pitch motion analysis...")
             motion_analyzer.trim_pitching_motion(
                 video_path=video_path,
                 output_path=output_path,
                 pitcher_box=pitcher_box,
                 end_frame_offset=end_frame_offset,
-                debug_viz_path=debug_viz_path
+                debug_viz_path=debug_viz_path,
+                create_overlay_video=create_overlay_video
             )
 
             self.logger.info("Pitcher motion trimming complete.")
-            return {"status": "success", "output_path": output_path, "debug_path": debug_viz_path}
+            
+            # Prepare return data
+            result = {
+                "status": "success", 
+                "output_path": output_path,
+                "debug_path": debug_viz_path
+            }
+            
+            # Add frame information if summary file exists
+            if debug_viz_path:
+                summary_file = os.path.join(debug_viz_path, "trim_summary.txt")
+                if os.path.exists(summary_file):
+                    try:
+                        with open(summary_file, 'r') as f:
+                            for line in f:
+                                if ':' in line:
+                                    key, value = line.strip().split(':', 1)
+                                    try:
+                                        result[key.strip()] = int(value.strip())
+                                    except ValueError:
+                                        result[key.strip()] = value.strip()
+                    except Exception as e:
+                        self.logger.warning(f"Could not read summary file: {e}")
+            
+            return result
+            
         except Exception as e:
-            self.logger.error(f"Failed to trim pitcher video: {e}", exc_info=True)
-            return {"status": "error", "message": str(e)}
+            error_msg = str(e)
+            self.logger.error(f"Failed to trim pitcher video: {error_msg}", exc_info=True)
+            return {"status": "error", "message": error_msg, "debug_path": debug_viz_path}
