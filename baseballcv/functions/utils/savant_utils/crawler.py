@@ -24,7 +24,7 @@ class Crawler(ABC):
             2022: (date(2022, 4, 7), date(2022, 11, 5)),
             2023: (date(2023, 3, 30), date(2023, 11, 1)),
             2024: (date(2024, 3, 28), date(2024, 10, 30)),
-            2025: (date(2025, 3, 27), date(2025, 4, 23)) # Will fix this as the season progresses.
+            2025: (date(2025, 3, 27), date(2025, 10, 30)) # Will fix this as the season progresses.
             }
         self.start_dt = start_dt
         self.end_dt = end_dt
