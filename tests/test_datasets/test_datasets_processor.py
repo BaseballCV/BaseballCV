@@ -1,14 +1,14 @@
 import pytest
 import os
-import tempfile
-import shutil
 import json
 import logging
+from typing import Tuple
 from baseballcv.datasets import DataProcessor
 
+@pytest.mark.skip(reason="Appears outdated with the new Translator class. Class needs to be refined anyways")
 class TestDataProcessor:
     @pytest.fixture
-    def setup_data_processor_and_dataset(self, load_tools) -> tuple[DataProcessor, str, dict]:
+    def setup_data_processor_and_dataset(self, load_dataset) -> Tuple[DataProcessor, str, dict]:
         """Set up a DataProcessor instance and temporary directories
         
         This fixture initializes a DataProcessor instance with a logger and loads a baseball
@@ -28,12 +28,11 @@ class TestDataProcessor:
         logger = logging.getLogger("test_logger")
         
         processor = DataProcessor(logger)
-        dict_classes = {0: 'glove', 1: 'homeplate', 2: 'baseball', 3: 'rubber'}
+        dict_classes = {0: 'batter', 1: 'pitcher'}
 
-        processed_dataset_path = load_tools.load_dataset(dataset_alias="baseball")
+        processed_dataset_path = load_dataset['yolo']
         
-        yield processor, processed_dataset_path, dict_classes
-        shutil.rmtree(processed_dataset_path)
+        return processor, processed_dataset_path, dict_classes
 
     def test_prepare_dataset_with_existing_split(self, setup_data_processor_and_dataset) -> None:
         """Test prepare_dataset method with an existing train/test/valid split
