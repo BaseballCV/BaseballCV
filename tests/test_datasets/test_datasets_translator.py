@@ -13,7 +13,7 @@ class TestDatasetTranslator:
     formats are in the format you would see on Roboflow.
     """
 
-    @pytest.fixture
+    @pytest.fixture(scope='module')
     def setup(self, tmp_path_factory) -> dict:
         base = tmp_path_factory.mktemp("conversions")
 

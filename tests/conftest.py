@@ -2,7 +2,7 @@ import pytest
 import multiprocessing as mp
 from unittest.mock import Mock
 import requests
-from baseballcv.functions import DataTools, LoadTools, BaseballTools
+from baseballcv.functions import LoadTools, BaseballTools
 from baseballcv.utilities import BaseballCVLogger
 import os
 import torch
@@ -30,20 +30,6 @@ def setup_multiprocessing() -> None:
         mp.set_start_method('spawn', force=True)
     
     return None
-        
-@pytest.fixture
-def data_tools() -> DataTools:
-    """
-    Provides a DataTools instance for testing.
-    
-    Creates and returns a DataTools object with a reduced number of workers
-    to prevent excessive resource usage during testing while still allowing
-    parallel processing functionality to be tested.
-
-    Returns:
-        DataTools: An instance of DataTools.
-    """
-    return DataTools()
 
 @pytest.fixture
 def load_tools() -> LoadTools:
@@ -59,15 +45,15 @@ def load_tools() -> LoadTools:
     """
     return LoadTools()
 
-@pytest.fixture
+@pytest.fixture(scope='session') # Only run once
 def load_dataset() -> Dict[str, str]:
     """
     Returns the respective dataset path for each tested dataset type. 
     Use this for any tests on datasets, not datasets in the API due to 
     their size, which can slow down testing speed.
 
-    Yields:
-        Generator[dict]: An iterable of each dataset stored in a dictionary.
+    Returns:
+        Dict[str, str]: An iterable of each dataset stored in a dictionary.
     """
     return {
         'coco': 'tests/data/test_datasets/coco_stuff',

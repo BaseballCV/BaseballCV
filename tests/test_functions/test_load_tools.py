@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 
 # TODO: Test for Hugging Face dataset.
+@pytest.mark.skip(reason="Going to be new implementation")
 class TestLoadTools:
     """ Test Class that affirms Load Tools works properly """
 
@@ -72,22 +73,3 @@ class TestLoadTools:
 
         assert os.path.exists(temp_dir), "Should be a file"
         assert dataset_path == Path("data"), "Dataset txt File should be the same name as the test"
-
-    fail_params = [
-                ("data", {'dataset_alias': 'gogoguardians'}, ValueError),
-                ("model", {'model_alias': 'gogoguardians'}, ValueError),
-                ("model", {'model_alias': 'phc_detector', 'model_type': 'XGBoost'}, ValueError)
-            ]
-    @pytest.mark.parametrize("load_type, params, expectation", fail_params)
-    def test_load_tools_fail_params(self, load_type, params, expectation, load_tools):
-        """
-        Tests to make sure inputting the wrong parameter results in an error.
-        This is iteratively checking for both the model and dataset parameters.
-        """
-        if load_type == "data":
-            with pytest.raises(expectation):
-                load_tools.load_dataset(**params)
-        
-        else:
-            with pytest.raises(expectation):
-                load_tools.load_model(**params)

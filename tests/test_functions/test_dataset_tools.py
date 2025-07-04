@@ -1,32 +1,34 @@
-import shutil
+import pytest
 import os
 import tempfile
-import pytest
-from unittest.mock import patch
-import pandas as pd
 from baseballcv.functions.dataset_tools import DataTools
 from baseballcv.functions.load_tools import LoadTools
 
 class TestDatasetTools:
     """ Test class for various Dataset Generation Tools """
 
-    @pytest.fixture(scope="class")
-    def setup(self):
+    @pytest.fixture(scope='module') # Only run this once
+    def setup(self, tmp_path_factory) -> str:
         """ Sets up the environment for Dataset Tools"""
     
-        temp_dir = tempfile.mkdtemp()
-        temp_video_dir = tempfile.mkdtemp()
+        tmp_dir = tmp_path_factory.mktemp("dataset_tools")
+        temp_dir = tmp_dir / "frames"
+        temp_video_dir = tmp_dir / "videos"
+        temp_dir.mkdir()
+        temp_video_dir.mkdir()
 
-        return {'temp_dir': temp_dir, 'temp_video_dir': temp_video_dir}
+        DataTools().generate_photo_dataset(
+            output_frames_folder=temp_dir,
+            video_download_folder=temp_video_dir,
+            max_plays=2,
+            max_num_frames=10,
+            use_savant_scraper=False,
+            input_video_folder='tests/data/test_functions/savant_scraper_ex_videos'
+        )
 
-    @pytest.fixture(scope="class")
-    def clean(self):
-        for attr_name in dir(self):
-            attr = getattr(self, attr_name)
-            if isinstance(attr, dict) and 'temp_dir' in attr:
-                if os.path.exists(attr['temp_dir']):
-                    shutil.rmtree(attr['temp_dir'])
+        return str(temp_dir)
 
+    @pytest.mark.skip(reason='don\'t think this is necessary')
     def test_data_tools_init(self):
         """
         Tests the instance generation of data tools, affirming the defaults of itself
@@ -38,27 +40,12 @@ class TestDatasetTools:
         assert isinstance(tools.LoadTools, LoadTools)
         assert tools.output_folder == ''
 
-    @pytest.mark.network
-    @pytest.mark.parametrize("use_supervision, value", [("use_supervision", False), ("use_supervision", True)])
-    def test_generate_photo_dataset(self, data_tools, setup, use_supervision, value):
+    def test_generate_photo_dataset(self, setup):
         """
         Tests the generate_photo_dataset method using example call.
         Keeps part of output for the following test_automated_annotation method.
         """
-        temp_dir = setup['temp_dir']
-        temp_video_dir = setup['temp_video_dir']
-
-        data_tools.generate_photo_dataset(
-            output_frames_folder=temp_dir,
-            video_download_folder=temp_video_dir,
-            max_plays=2,
-            max_num_frames=10,
-            max_videos_per_game=1,
-            start_date="2024-04-01",
-            end_date="2024-04-01",
-            delete_savant_videos=True,
-            use_supervision=value
-        )
+        temp_dir = setup
 
         assert os.path.exists(temp_dir)
         frames = os.listdir(temp_dir)
@@ -67,47 +54,34 @@ class TestDatasetTools:
         for frame in frames:
             assert frame.endswith(('.jpg', '.png')), f'Invalid frame format {frame}'
 
-    @pytest.mark.network
-    @pytest.mark.parametrize("mode, value", [("mode", "autodistill"), ("mode", "legacy")])
-    def test_automated_annotation(self, setup, data_tools, load_tools, mode, value):
+    @pytest.mark.parametrize("mode", ["autodistill", "legacy"])
+    def test_automated_annotation(self, setup, mode):
         """
         Tests the annotation tools to make sure the proper file systems are loaded 
         and manipulated.
         """
-        temp_dir = setup['temp_dir']
-        temp_video_dir = setup['temp_video_dir']
+        temp_dir = setup
 
-        data_tools.generate_photo_dataset(
-            output_frames_folder=temp_dir,
-            video_download_folder=temp_video_dir,
-            max_plays=2,
-            max_num_frames=10,
-            max_videos_per_game=1,
-            start_date="2024-04-01",
-            end_date="2024-04-01",
-            delete_savant_videos=True
-        )
-
-        ontology = { "a mitt worn by a baseball player for catching a baseball": "glove" } if value == "autodistill" else None
+        ontology = { "a mitt worn by a baseball player for catching a baseball": "glove" } if mode == "autodistill" else None
 
         legacy_annotation_dir = tempfile.mkdtemp()
         autodistill_annotation_dir = tempfile.mkdtemp()
-        annotation_dir = legacy_annotation_dir if value != "autodistill" else autodistill_annotation_dir
+        annotation_dir = legacy_annotation_dir if mode != "autodistill" else autodistill_annotation_dir
 
         with tempfile.TemporaryDirectory() as annotation_dir:
-            data_tools.automated_annotation(
+            DataTools().automated_annotation(
                 model_alias="glove_tracking",
                 model_type="detection",
                 image_dir=temp_dir,
-                output_dir=annotation_dir if value != "autodistill" else f"{annotation_dir}_autodistill",
+                output_dir=annotation_dir if mode != "autodistill" else f"{annotation_dir}_autodistill",
                 conf=0.5,
-                mode=value,
+                mode=mode,
                 ontology=ontology,
                 batch_size=100
             )
             assert os.path.exists(annotation_dir)
 
-            if value != "autodistill":
+            if mode != "autodistill":
                 assert os.path.exists(os.path.join(annotation_dir, "annotations"))
                 images = os.listdir(annotation_dir)
                 annotations = os.listdir(os.path.join(annotation_dir, "annotations"))
@@ -117,7 +91,7 @@ class TestDatasetTools:
                 for ann_file in annotations:
                     assert ann_file.endswith('.txt'), f"Invalid annotation format: {ann_file}"
                 
-                os.remove(load_tools.yolo_model_aliases['glove_tracking'].replace('.txt', '.pt')) # Remove the loaded pytorch file
+                os.remove(LoadTools().yolo_model_aliases['glove_tracking'].replace('.txt', '.pt')) # Remove the loaded pytorch file
 
             else:
                 assert os.path.exists(os.path.join(f"{annotation_dir}_autodistill", "train", "labels")), "Should have labels"

@@ -7,7 +7,8 @@ from transformers import DetrImageProcessor
 from baseballcv.datasets import CocoDetectionDataset
 
 class TestCocoDetectionDataset:
-    @pytest.fixture
+
+    @pytest.fixture(scope='module')
     def setup(self, load_dataset) -> Generator[Tuple[str, DetrImageProcessor], Any, None]:
         """Download and set up the actual COCO dataset provided by BaseballCV for testing
         

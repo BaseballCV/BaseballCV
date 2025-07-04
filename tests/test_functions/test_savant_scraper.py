@@ -1,15 +1,13 @@
 import pytest
-from baseballcv.functions.savant_scraper import BaseballSavVideoScraper
-from baseballcv.functions.utils.savant_utils.crawler import Crawler
-from baseballcv.functions.utils.savant_utils.gameday import GamePlayIDScraper
+import os
+import time
+import requests
 import polars as pl
 import pandas as pd
 from unittest.mock import patch, Mock
-import requests
-import os
-import shutil
-import tempfile
-import time
+from baseballcv.functions.savant_scraper import BaseballSavVideoScraper
+from baseballcv.functions.utils.savant_utils.crawler import Crawler
+from baseballcv.functions.utils.savant_utils.gameday import GamePlayIDScraper
 
 class TestCrawler(Crawler):
     """
@@ -34,18 +32,10 @@ class TestSavantScraper:
     some background tasks that assure that the rate limit prevention methods for the
     API calls are working as expected.
     """
-    @pytest.fixture(scope='class')
-    def setup(self) -> dict:
-        temp_dir = tempfile.mkdtemp()
-        return {'temp_dir': temp_dir}
-
-    @pytest.fixture(scope="class")
-    def teardown(self) -> None:
-        for attr_name in dir(self):
-            attr = getattr(self, attr_name)
-            if isinstance(attr, dict) and 'temp_dir' in attr:
-                if os.path.exists(attr['temp_dir']):
-                    shutil.rmtree(attr['temp_dir'])
+    @pytest.fixture(scope='module')
+    def setup(self, tmp_path_factory) -> dict:
+        temp_dir = tmp_path_factory.mktemp('savant_scraper').mkdir(exist_ok=True)
+        return {'temp_dir': str(temp_dir)}
 
     def test_init(self, setup):
         """
@@ -75,6 +65,7 @@ class TestSavantScraper:
             assert start_dt == test_end_dt, "The dates should be swapped"
             assert os.path.exists(scraper.download_folder), "A Download Folder should be created"
     
+    @pytest.mark.network
     def test_video_names(self, setup):
         """
         Tests the naming convention of the `download_folder` videos and the DataFrames returned are
@@ -168,6 +159,7 @@ class TestSavantScraper:
             assert response.status_code == 200, "The 3rd request should be successful."
             assert mock_get.call_count == 3, "Mock get should be called 3 times."
 
+    @pytest.mark.network
     def test_teams_players_pitch_types(self):
         """
         Tests for various parameter entry such as the teams, players, and pitch types.
@@ -223,6 +215,7 @@ class TestSavantScraper:
         with pytest.raises(error):
             BaseballSavVideoScraper('2024-05-03', download_folder=dir, **params)
 
+    @pytest.mark.network
     def test_old_dates(self):
         """
         Tests on older dates where queries could cause issue. It also tests scraping the end of one season
