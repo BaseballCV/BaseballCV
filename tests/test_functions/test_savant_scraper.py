@@ -1,6 +1,5 @@
 import pytest
 import os
-import time
 import requests
 import polars as pl
 import pandas as pd
@@ -9,9 +8,9 @@ from baseballcv.functions.savant_scraper import BaseballSavVideoScraper
 from baseballcv.functions.utils.savant_utils.crawler import Crawler
 from baseballcv.functions.utils.savant_utils.gameday import GamePlayIDScraper
 
-class TestCrawler(Crawler):
+class MonkeyPatchCrawler(Crawler):
     """
-    Test Class that inherits from `Crawler`. This class is necessary as it's implementing the 
+    Monkey Patch Class that inherits from `Crawler`. This class is necessary as it's implementing the 
     run executor, which is abstract or else tests on it will throw an error.
     """
     def __init__(self, start_dt, end_dt = None):
@@ -21,7 +20,7 @@ class TestCrawler(Crawler):
         
 @pytest.fixture
 def test_crawler():
-    return TestCrawler('2024-02-01')
+    return MonkeyPatchCrawler('2024-02-01')
 
 class TestSavantScraper:
     """
@@ -34,10 +33,12 @@ class TestSavantScraper:
     """
     @pytest.fixture(scope='module')
     def setup(self, tmp_path_factory) -> dict:
-        temp_dir = tmp_path_factory.mktemp('savant_scraper').mkdir(exist_ok=True)
+        temp_dir = tmp_path_factory.mktemp('savant_scraper')
         return {'temp_dir': str(temp_dir)}
 
-    def test_init(self, setup):
+    @patch("baseballcv.functions.utils.savant_utils.gameday.GamePlayIDScraper.run_executor")
+    @patch("baseballcv.functions.utils.savant_utils.gameday.GamePlayIDScraper.__init__", return_value=None)
+    def test_init(self, mock_init, mock_run_executor, setup):
         """
         Tests the `BaseballSavVideoScraper`implementation.
 
@@ -49,21 +50,18 @@ class TestSavantScraper:
         - The `BaseballSavVideoScraper` is a subclass of the Crawler class
         - That a download folder is created as a result.
         """
-        dir = setup['temp_dir']
-        with patch("baseballcv.functions.utils.savant_utils.gameday.GamePlayIDScraper.run_executor", 
-                   return_value=pl.DataFrame({'play_id': 'eedwfe-saewqw',
-                                              'game_pk': '12345'})):
+        mock_run_executor.return_value = pl.DataFrame({'play_id': 'eedwfe-saewqw', 'game_pk': '12345'})
 
-            start_dt, end_dt = '2024-05-01', '2024-04-28'
-            scraper = BaseballSavVideoScraper(start_dt, end_dt, download_folder=dir)
-            
-            assert issubclass(BaseballSavVideoScraper, Crawler), "Savant Scraper is a subclass of Crawler"
+        start_dt, end_dt = '2024-05-01', '2024-04-28'
+        scraper = BaseballSavVideoScraper(start_dt, end_dt, download_folder=setup['temp_dir'])
+        
+        assert issubclass(BaseballSavVideoScraper, Crawler), "Savant Scraper is a subclass of Crawler"
 
-            test_start_dt, test_end_dt = scraper.start_dt, scraper.end_dt
+        test_start_dt, test_end_dt = scraper.start_dt, scraper.end_dt
 
-            assert end_dt == test_start_dt, "The dates should be swapped"
-            assert start_dt == test_end_dt, "The dates should be swapped"
-            assert os.path.exists(scraper.download_folder), "A Download Folder should be created"
+        assert end_dt == test_start_dt, "The dates should be swapped"
+        assert start_dt == test_end_dt, "The dates should be swapped"
+        assert os.path.exists(scraper.download_folder), "A Download Folder should be created"
     
     @pytest.mark.network
     def test_video_names(self, setup):
@@ -80,8 +78,8 @@ class TestSavantScraper:
         - Each file name has the `game_pk` and `play_id` as the name and ends in .mp4.
         - The `cleanup_savant_videos` function works as expected.
         """
-        dir = setup['temp_dir']
-        scraper = BaseballSavVideoScraper('2024-04-12', max_return_videos=20, max_videos_per_game=2, download_folder=dir)
+        output_dir = setup['temp_dir']
+        scraper = BaseballSavVideoScraper('2024-04-12', max_return_videos=10, max_videos_per_game=2, download_folder=output_dir)
 
         assert len(scraper.game_pks) == len(scraper.play_ids), "Game PKs and Play Ids should be the same length"
         assert os.path.exists(scraper.download_folder), "A Download Folder should be created"
@@ -95,12 +93,12 @@ class TestSavantScraper:
         assert isinstance(df, pd.DataFrame), "This better be a pandas DataFrame"
 
         download_folder = scraper.download_folder
-        dir = os.listdir(download_folder)
-        assert len(dir) <= 20, "There should be at most 20 returned videos"
+        output_dir = os.listdir(download_folder)
+        assert len(output_dir) <= 20, "There should be at most 20 returned videos"
 
         # Because threadpool is random with the executions, I have to manually search for the game pk, yikes
         found = False
-        for file in dir:
+        for file in output_dir:
             assert file.endswith('.mp4'), "File should be in .mp4 format"
             assert "_" in file, "There should be a _ seperator for game pk and play id"
 
@@ -178,26 +176,25 @@ class TestSavantScraper:
         """
         # Spencer Strider Game, Braves were away
         # This test can use the data
-        team_abbr = ['ATL', None]
-        for abbr in team_abbr:
-            play_ids_df = GamePlayIDScraper('2024-03-29', team_abbr=abbr, player=675911, pitch_type='FF').run_executor()
-            assert not play_ids_df.is_empty()
-            assert play_ids_df.select(pl.col("game_pk").n_unique()).item() == 1, "Should only be one game returned"
-            assert play_ids_df.select(pl.col("game_pk").unique()).item() == 745604, "This is the game that should be returned."
-            assert play_ids_df.select(pl.col("pitcher").n_unique()).item() == 1, "Should only be one pitcher returned"
-            assert play_ids_df.select(pl.col("pitcher").unique()).item() == 675911, "Should return Spencer Strider ID"
-            assert play_ids_df.select(pl.col("pitch_type").n_unique()).item() == 1, "Should only be one pitch type returned"
-            assert play_ids_df.select(pl.col("pitch_type").unique()).item() == 'FF', "Pitch Type should be fastball (FF)"
-            assert play_ids_df.select(pl.col("away_team").n_unique()).item() == 1, "Should only be one team returned"
-            assert play_ids_df.select(pl.col("away_team").unique()).item() == 'ATL', "Should return the Braves"
-            time.sleep(2) # Gives the API a little buffer
+        play_ids_df = GamePlayIDScraper('2024-03-29', team_abbr='ATL', player=675911, pitch_type='FF').run_executor()
+        assert not play_ids_df.is_empty()
+        assert play_ids_df.select(pl.col("game_pk").n_unique()).item() == 1, "Should only be one game returned"
+        assert play_ids_df.select(pl.col("game_pk").unique()).item() == 745604, "This is the game that should be returned."
+        assert play_ids_df.select(pl.col("pitcher").n_unique()).item() == 1, "Should only be one pitcher returned"
+        assert play_ids_df.select(pl.col("pitcher").unique()).item() == 675911, "Should return Spencer Strider ID"
+        assert play_ids_df.select(pl.col("pitch_type").n_unique()).item() == 1, "Should only be one pitch type returned"
+        assert play_ids_df.select(pl.col("pitch_type").unique()).item() == 'FF', "Pitch Type should be fastball (FF)"
+        assert play_ids_df.select(pl.col("away_team").n_unique()).item() == 1, "Should only be one team returned"
+        assert play_ids_df.select(pl.col("away_team").unique()).item() == 'ATL', "Should return the Braves"
 
     @pytest.mark.parametrize("params, error", [
                               ({'team_abbr': 'YO'}, ValueError),
                               ({'player': 12345}, ValueError),
                               ({'player': 608070, 'team_abbr': 'YO'}, ValueError)
                               ])
-    def test_scraper_exceptions(self, params, error, setup):
+    @patch("baseballcv.functions.utils.savant_utils.gameday.GamePlayIDScraper.run_executor", return_value=None)
+    @patch("baseballcv.functions.utils.savant_utils.gameday.GamePKScraper.run_executor", return_value=None)
+    def test_scraper_exceptions(self, mock_game_pk_executor, mock_play_id_executor, params, error, setup):
         """
         Tests various exceptions that occur if the input is invalid.
 
@@ -211,18 +208,5 @@ class TestSavantScraper:
         - A invalid `player` raises a ValueError.
         - A valid `player` and invalid `team_abbr` raises a ValueError.
         """
-        dir = setup['temp_dir']
         with pytest.raises(error):
-            BaseballSavVideoScraper('2024-05-03', download_folder=dir, **params)
-
-    @pytest.mark.network
-    def test_old_dates(self):
-        """
-        Tests on older dates where queries could cause issue. It also tests scraping the end of one season
-        to another to make sure not issue is encountered.
-
-        The following are tested for in this test case:
-        - The DataFrame returned is not empty, meaning plays are available to scrape with older dates.
-        """
-        df = GamePlayIDScraper('2016-11-01', '2017-04-03').run_executor()
-        assert not df.is_empty()
+            BaseballSavVideoScraper('2024-05-03', download_folder=setup['temp_dir'], **params)

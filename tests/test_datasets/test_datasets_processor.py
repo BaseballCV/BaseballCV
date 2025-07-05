@@ -18,7 +18,7 @@ class TestDataProcessor:
         Args:
             load_tools: Fixture providing tools to load datasets
             
-        Yields:
+        Returns:
             tuple: A tuple containing:
                 - processor (DataProcessor): Initialized DataProcessor instance
                 - processed_dataset_path (str): Path to the downloaded dataset

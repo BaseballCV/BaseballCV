@@ -28,18 +28,6 @@ class TestDatasetTools:
 
         return str(temp_dir)
 
-    @pytest.mark.skip(reason='don\'t think this is necessary')
-    def test_data_tools_init(self):
-        """
-        Tests the instance generation of data tools, affirming the defaults of itself
-        don't change.
-        """
-
-        tools = DataTools()
-
-        assert isinstance(tools.LoadTools, LoadTools)
-        assert tools.output_folder == ''
-
     def test_generate_photo_dataset(self, setup):
         """
         Tests the generate_photo_dataset method using example call.
