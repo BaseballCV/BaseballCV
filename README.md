@@ -5,7 +5,7 @@
 [![BaseballCV Core Functionality](https://github.com/dylandru/BaseballCV/actions/workflows/pytest.yml/badge.svg)](https://github.com/dylandru/BaseballCV/actions/workflows/pytest.yml)
 [![Package Build](https://github.com/dylandru/BaseballCV/actions/workflows/build.yml/badge.svg)](https://github.com/dylandru/BaseballCV/actions/workflows/build.yml)
 [![codecov](https://codecov.io/github/BaseballCV/BaseballCV/graph/badge.svg?token=86UGAREPSB)](https://codecov.io/github/BaseballCV/BaseballCV)
-![Discord](https://img.shields.io/discord/1295073049087053874?style=flat&logo=discord&label=Join%20Our%20Discord!&color=green&link=https%3A%2F%2Fdiscord.com%2Fchannels%2F1295073049087053874%2F)
+[![Discord](https://img.shields.io/discord/1295073049087053874?style=flat&logo=discord&label=Join%20Our%20Discord!&color=green&link=https%3A%2F%2Fdiscord.com%2Fchannels%2F1295073049087053874%2F)](https://discord.gg/N88hWvkncZ)
 
 ![PyPI Downloads](https://img.shields.io/pypi/dm/baseballcv?logo=pypi&label=Package%20Downloads)
 ![PyPI - Version](https://img.shields.io/pypi/v/baseballcv?logo=pypi&label=Version&color=green&link=https%3A%2F%2Fpypi.org%2Fproject%2Fbaseballcv%2F)
