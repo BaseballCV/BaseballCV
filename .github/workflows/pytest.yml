@@ -3,8 +3,14 @@ name: BaseballCV Core Functionality
 on:
   push:
     branches: [ main ]
+    paths:
+      - baseballcv/**
+      - tests/**
   pull_request:
     branches: [ main ]
+    paths:
+      - baseballcv/**
+      - tests/**
   workflow_dispatch:
 
 jobs:
