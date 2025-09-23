@@ -16,7 +16,7 @@ on:
           - refactor
 
 jobs:
-  release:
+  release-workflow-baby:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -32,14 +32,14 @@ jobs:
         shell: bash
         run: |
           git fetch --tags
-          LATEST_TAG=$(git describe --tags --abbrev=0)
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.00")
           echo "Latest Tag: $LATEST_TAG"
-          echo "tag=LATEST_TAG" >> "$GITHUB_OUTPUT"
+          echo "old_tag=$LATEST_TAG" >> "$GITHUB_OUTPUT"
       
       - name: Bump version
         id: bump
         run: |
-          CURRENT="${{ steps.get_tag.outputs.tag }}"
+          CURRENT="${{ steps.get_tag.outputs.old_tag }}"
           CURRENT_STRP="${CURRENT#v}" # strip the 'v'
 
           IFS='.' read -r REFACTOR MAJOR MINOR PATCH <<< "$CURRENT_STRP"
@@ -91,7 +91,7 @@ jobs:
           export RECENT_CHANGES
           export VERSION
 
-          # Replace {{CHANGES}} placeholder in README file
+          # Replace placeholders in README file
           perl -i.bak -pe '
           BEGIN {
             $ENV{"RECENT_CHANGES"} =~ s/\r?\n/\n/g;
@@ -110,6 +110,7 @@ jobs:
 
   deploy-package:
     runs-on: ubuntu-latest
+    needs: release-workflow-baby
     permissions:
       contents: read
       id-token: write
