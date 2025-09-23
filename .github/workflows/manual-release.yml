@@ -64,13 +64,13 @@ jobs:
               ((PATCH+=1))
               ;;
             *)
-              echo "❌ Invalid bump type: ${{ inputs.bump }}"
+              echo "Invalid bump type: ${{ inputs.bump }}"
               exit 1
               ;;
           esac
 
           NEW_TAG="v${REFACTOR}.${MAJOR}.${MINOR}.${PATCH}"
-          echo "🔖 New tag will be: $NEW_TAG"
+          echo "New tag will be: $NEW_TAG"
 
           # Output for other steps
           echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
