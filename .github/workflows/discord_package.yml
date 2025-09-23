@@ -57,19 +57,22 @@ jobs:
         uses: Ilshidur/action-discord@master
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.PACKAGE_DISCORD_WEBHOOK }}
+          DISCORD_EMBEDS: |
+            {
+              "embeds": [{
+                "title": "${{ steps.prepare.outputs.release_name }}",
+                "description": ${{ toJson(steps.prepare.outputs.final_body) }},
+                "url": "${{ steps.prepare.outputs.release_url }}",
+                "color": 5814783,
+                "author": {
+                  "name": "${{ steps.prepare.outputs.author_login }}",
+                  "url": "${{ steps.prepare.outputs.author_url }}",
+                  "icon_url": "${{ steps.prepare.outputs.author_avatar_url }}"
+                },
+                "footer": {
+                  "text": "View full details by clicking the title link."
+                }
+              }]
+            }
         with:
-          embeds: |
-            [{
-              "title": "${{ steps.prepare.outputs.release_name }}",
-              "description": ${{ toJson(steps.prepare.outputs.final_body) }},
-              "url": "${{ steps.prepare.outputs.release_url }}",
-              "color": 5814783,
-              "author": {
-                "name": "${{ steps.prepare.outputs.author_login }}",
-                "url": "${{ steps.prepare.outputs.author_url }}",
-                "icon_url": "${{ steps.prepare.outputs.author_avatar_url }}"
-              },
-              "footer": {
-                "text": "View full details by clicking the title link."
-              }
-            }]
+          args: A Release has been triggered
