@@ -509,15 +509,15 @@ For any professional baseball team or commercial entities that wish to use Base
 
 For more information on obtaining a commercial license, please contact Dylan Drummey, Carlos Marcano, or Eddie Dew (means of contact shared below).
 
-### Important Licensing Clarification for Major League Baseball (MLB) Entities
+### Important Licensing Clarification for any professional baseball team, including Major League Baseball (MLB) Entities
 
 1.  **For professional baseball teams:**
-    The use, modification, deployment, or distribution of this software (or any derivative works based upon it) directly by, or for the operational, analytical, or developmental purposes of, a **Major League Baseball (MLB) team** (including its directly owned and operated affiliates) is subject to the terms of the GNU Affero General Public License v3.0 (AGPLv3). A copy of the AGPLv3 is included in this repository as `LICENSE-MLB-AGPL.txt` for review.
+    The use, modification, deployment, or distribution of this software (or any derivative works based upon it) directly by, or for the operational, analytical, or developmental purposes of, a professional baseball team like **Major League Baseball (MLB) teams** (including its directly owned and operated affiliates) is subject to the terms of the GNU Affero General Public License v3.0 (AGPLv3). A copy of the AGPLv3 is included in this repository as `LICENSE-MLB-AGPL.txt` for review.
 
     Professional teams (or entities acting directly on a team's behalf for such purposes) intending to use this software under these conditions must contact Dylan Drummey, Carlos Marcano, or Eddie Dew at the contact information below to apply for a Commercial Edition of the License.
 
 2.  **Exclusion for Contractors and Professional Leagues Employees (acting in individual or general league capacities):**
-    To clarify, the specific AGPLv3 licensing requirement mentioned above for MLB **teams** **does not** apply to individuals who are contractors/league employees when they are using this software for their own individual projects, personal education, or for general league operational tasks not specific to the competitive baseball operations of a particular professional team. In such cases, these individuals are covered by the AGPLv3 License.
+    To clarify, the specific AGPLv3 licensing requirement mentioned above for professional **teams** **does not** apply to individuals who are contractors/league employees when they are using this software for their own individual projects, personal education, or for general league operational tasks not specific to the competitive baseball operations of a particular professional team. In such cases, these individuals are covered by the AGPLv3 License.
 
 3.  **Overriding Principle for Team Use:**
     Notwithstanding the above, if any software derived from this project is ultimately used, deployed by, or operated for the direct benefit and under the control of a **professional team** for its team-specific purposes, that **team's** use and distribution of such software (regardless of who performed the modifications) falls under the AGPLv3 obligations.
