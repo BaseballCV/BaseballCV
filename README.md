@@ -9,7 +9,7 @@
 
 ![PyPI Downloads](https://img.shields.io/pypi/dm/baseballcv?logo=pypi&label=Package%20Downloads)
 ![PyPI - Version](https://img.shields.io/pypi/v/baseballcv?logo=pypi&label=Version&color=green&link=https%3A%2F%2Fpypi.org%2Fproject%2Fbaseballcv%2F)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: AGPLv3](https://www.gnu.org/graphics/agplv3-155x51.png)](https://www.gnu.org/licenses/agpl-3.0.en.html)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg?logo=python)](https://www.python.org/downloads/)
 
 ![BaseballCV Logo](baseballcv/assets/baseballcvlogo.png)
