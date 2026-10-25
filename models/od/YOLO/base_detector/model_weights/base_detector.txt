@@ -1,1 +1,1 @@
-https://data.balldatalab.com/index.php/s/gg3Pnqa2WWdTsTL/download/BaseDetectorModel.pt
+https://balldatalab.com/static/models/base_detector_v21.pt
