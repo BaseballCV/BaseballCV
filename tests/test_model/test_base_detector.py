@@ -130,8 +130,9 @@ class TestBaseDetectorIntegration:
 
     @pytest.mark.network
     def test_model_loads_via_alias(self, detector):
+        # default weights are the dataset v2.1 retrain (base + distractor), see #183
         assert detector.model is not None
-        assert detector.model.names == {0: "base"}
+        assert detector.model.names == {0: "base", 1: "distractor"}
 
     @pytest.mark.network
     def test_predict_returns_list(self, detector, tmp_path):
