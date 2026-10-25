@@ -55,7 +55,7 @@ class LoadTools:
             'ball_trackingv4': 'models/od/YOLO/ball_tracking/model_weights/ball_trackingv4.txt',
             'amateur_pitcher_hitter': 'models/od/YOLOv9/amateur_pitcher_hitter/model_weights/amateur_pitcher_hitter.txt',
             'homeplate_tracking': 'models/od/YOLOv9/homeplate_tracking/model_weights/homeplate_tracking.txt',
-            'base_detector': 'models/od/YOLO/base_detector/model_weights/base_detector.txt',
+            'base_detector': 'models/od/YOLO/base_detector_v21/model_weights/base_detector_v21.txt',
             'base_detector_v2': 'models/od/YOLO/base_detector_v2/model_weights/base_detector_v2.txt'
         }
         self.florence_model_aliases = {

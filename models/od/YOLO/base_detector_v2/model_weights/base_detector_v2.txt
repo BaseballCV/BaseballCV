@@ -1,1 +1,1 @@
-https://balldatalab.com/static/models/base_detector_v2.pt
+https://balldatalab.com/static/models/base_detector_v21.pt
