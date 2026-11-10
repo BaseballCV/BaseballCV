@@ -113,6 +113,37 @@ class TestBaseDetectorFilter:
         detector = _make_detector_with_boxes([_FakeBox([300, 600, 331, 610], 0.68)])
         assert len(detector.predict("stub.jpg")) == 1
 
+    def test_distractor_class_is_excluded_from_predictions(self):
+        # v2.1 weights have a "distractor" class; it must never be reported as a base.
+        seen = {}
+
+        class _TwoClassYOLO(_FakeYOLO):
+            names = {0: "base", 1: "distractor"}
+
+            def predict(self, source, **kwargs):
+                seen.update(kwargs)
+                return super().predict(source, **kwargs)
+
+        detector = _make_detector_with_boxes([_FakeBox([100, 100, 229, 134], 0.87)])
+        detector.model = _TwoClassYOLO([_FakeBox([100, 100, 229, 134], 0.87)])
+        detector.predict("stub.jpg")
+        assert seen["classes"] == [0]
+
+    def test_single_class_model_gets_no_class_filter(self):
+        seen = {}
+
+        class _OneClassYOLO(_FakeYOLO):
+            names = {0: "base"}
+
+            def predict(self, source, **kwargs):
+                seen.update(kwargs)
+                return super().predict(source, **kwargs)
+
+        detector = _make_detector_with_boxes([])
+        detector.model = _OneClassYOLO([])
+        detector.predict("stub.jpg")
+        assert "classes" not in seen
+
     def test_default_thresholds_match_documented_mitigations(self):
         assert BaseDetector.DEFAULT_CONF == 0.5
         assert BaseDetector.DEFAULT_AR_MAX == 4.2

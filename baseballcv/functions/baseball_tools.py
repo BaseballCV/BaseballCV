@@ -6,7 +6,7 @@ import shutil
 import os
 from typing import Dict, List, Optional # Added Optional
 import concurrent.futures
-from .utils import DistanceToZone, GloveTracker, CommandAnalyzer # Import CommandAnalyzer
+from .utils import DistanceToZone, GloveTracker, CommandAnalyzer, StealAnalyzer, get_steal_events
 from baseballcv.utilities import BaseballCVLogger
 from baseballcv.functions.savant_scraper import BaseballSavVideoScraper
 
@@ -421,6 +421,95 @@ class BaseballTools:
                 return {"error": f"Error in scrape mode: {str(e)}"}
 
         return {"error": f"Unknown error processing in mode: {mode}"}
+
+    def analyze_steals(self,
+                       mode: str = "regular",
+                       video_path: str = None,
+                       input_folder: str = None,
+                       start_date: str = None,
+                       end_date: str = None,
+                       team_abbr: str = None,
+                       player: int = None,
+                       max_videos: int = 10,
+                       runner_height_in: float = None,
+                       create_video: bool = True,
+                       results_dir: str = "results",
+                       config=None) -> Dict:
+        """
+        Measure how runners leave first base on steals of second (lead, reaction time, first step,
+        acceleration) and label each play. See ``StealAnalyzer`` for the metric definitions.
+
+        Modes:
+            "regular": one video (``video_path``).
+            "batch": every video in ``input_folder``.
+            "scrape": find steals of second on Baseball Savant for a date range, download them,
+                      look up each runner's roster height (for scale) and analyze them.
+
+        Returns:
+            Dict with ``metrics`` (per-play DataFrame), ``runners`` (per-runner profiles),
+            ``csv`` (path to the per-play table) and, in scrape mode, ``coverage`` (the share of
+            clips where each measurement was observable).
+        """
+        if mode not in ("regular", "batch", "scrape"):
+            return {"error": f"Invalid mode: {mode}. Must be one of ['regular', 'batch', 'scrape']"}
+        analyzer = StealAnalyzer(device=self.device, config=config, results_dir=results_dir, logger=self.logger)
+        csv_path = os.path.join(results_dir, "steal_metrics.csv")
+
+        if mode == "regular":
+            if video_path is None or not os.path.exists(video_path):
+                return {"error": f"Video file not found at {video_path}"}
+            df = pd.DataFrame([analyzer.analyze_video(video_path, runner_height_in=runner_height_in,
+                                                      create_video=create_video)])
+            os.makedirs(results_dir, exist_ok=True)
+            df.to_csv(csv_path, index=False)
+            return {"metrics": df, "csv": csv_path}
+
+        if mode == "batch":
+            if input_folder is None or not os.path.exists(input_folder):
+                return {"error": f"Input folder not found: {input_folder}"}
+            df = analyzer.analyze_folder(input_folder, csv_path=csv_path,
+                                         runner_height_in=runner_height_in, create_video=create_video)
+            return {"metrics": df, "runners": StealAnalyzer.aggregate(df, "runner_id") if "runner_id" in df else None,
+                    "csv": csv_path}
+
+        if start_date is None:
+            return {"error": "start_date is required for scrape mode"}
+        from baseballcv.functions.utils.savant_utils.steal_events import get_runner_height_in
+        events = get_steal_events(start_date, end_date, team_abbr=team_abbr, player=player,
+                                  max_events=max_videos).to_pandas()
+        if events.empty:
+            return {"error": "No steals of second found for that query"}
+        download_folder = tempfile.mkdtemp(prefix="savant_steals_")
+        try:
+            scraper = BaseballSavVideoScraper.from_play_ids(
+                events["play_id"].tolist(), game_pks=events["game_pk"].tolist(),
+                download_folder=download_folder)
+            scraper.run_executor()
+            heights = {rid: get_runner_height_in(rid) for rid in events["runner_id"].dropna().unique()}
+            rows = []
+            for _, ev in events.iterrows():
+                path = os.path.join(download_folder, f"{ev['game_pk']}_{ev['play_id']}.mp4")
+                if not os.path.exists(path):
+                    rows.append({**ev.to_dict(), "status": "video_unavailable"})
+                    continue
+                try:
+                    res = analyzer.analyze_video(path, runner_height_in=heights.get(ev["runner_id"]),
+                                                 create_video=create_video)
+                except Exception as exc:
+                    res = {"status": f"error: {exc}"}
+                rows.append({**ev.to_dict(), **res})
+        finally:
+            shutil.rmtree(download_folder, ignore_errors=True)
+        df = pd.DataFrame(rows)
+        os.makedirs(results_dir, exist_ok=True)
+        df.to_csv(csv_path, index=False)
+        scored = df[df["status"] == "ok"] if "status" in df else df.iloc[0:0]
+        coverage = {"clips": len(df), "scored": len(scored)}
+        for col in ("primary_lead_ft", "reaction_time_s", "time_to_10ft_s", "first_step"):
+            coverage[col] = int(scored[col].notna().sum()) if col in scored else 0
+        self.logger.info(f"Steal analysis coverage: {coverage}")
+        return {"metrics": df, "runners": StealAnalyzer.aggregate(scored, "runner_id") if len(scored) else None,
+                "csv": csv_path, "coverage": coverage}
 
     def analyze_pitcher_command(self,
                                 csv_input_dir: str,

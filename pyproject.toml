@@ -33,6 +33,7 @@ pandas = "^2.2.3"
 polars = "^1.27.1"
 datasets = "^5.0.1"
 ultralytics = "^8.3.116"
+lapx = ">=0.5.11"  # required by ultralytics ByteTrack (steal analysis person tracking)
 mediapipe = {version = "^1.1.1", optional = true}
 coco-eval = "0.0.4"
 pytorch-lightning = ">=2.6.4,<3"

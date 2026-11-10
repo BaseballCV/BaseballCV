@@ -74,6 +74,11 @@ class BaseDetector:
             List[Dict[str, float]]: One dict per surviving detection, with keys
             `xyxy` (x1, y1, x2, y2), `conf`, and `aspect_ratio`.
         """
+        # v2.1+ weights carry a "distractor" class that must never be reported as a base.
+        names = getattr(self.model, "names", None) or {}
+        base_ids = [i for i, n in names.items() if str(n).lower() == "base"]
+        if base_ids and len(names) > 1:
+            pred_kwargs.setdefault("classes", base_ids)
         result = self.model.predict(source, conf=conf, device=self.device, verbose=False, **pred_kwargs)[0]
         detections = []
         for box in result.boxes:
@@ -87,7 +92,8 @@ class BaseDetector:
                 "conf": float(box.conf),
                 "aspect_ratio": w / h,
             })
-        self.logger.info(f"{len(detections)} base(s) detected in {source} (conf >= {conf}, w/h <= {ar_max})")
+        label = source if isinstance(source, str) else "<frame>"  # never dump a frame array into the log
+        self.logger.info(f"{len(detections)} base(s) detected in {label} (conf >= {conf}, w/h <= {ar_max})")
         return detections
 
     def annotate(
