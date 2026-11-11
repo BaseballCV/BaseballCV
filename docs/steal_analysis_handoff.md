@@ -68,16 +68,30 @@ Other changes:
 
 ## State of verification (be honest about this)
 
-- Unit tests: 33 steal tests pass; `tests/test_model/test_base_detector.py`, `tests/test_imports.py` and
-  `tests/test_functions/baseball_utils` pass (52 passed, 1 skipped, `-m "not network"`).
+- Unit tests: 36 steal tests pass (33 + 3 shot-cut regressions); `tests/test_model/test_base_detector.py`,
+  `tests/test_imports.py` and `tests/test_functions/baseball_utils` pass (`-m "not network"`). Re-run on a CPU-only
+  Linux box (6 cores, torch 2.15 CPU, Python 3.12): 45 passed on the steal + base-detector files.
 - On the synthetic steal the pipeline recovers the runner's first move within one frame and the lead exactly.
-- **Real footage has NOT been validated.** A scrape run of 6 steals (2026-06-10 to 06-11) was started on a CPU
-  Windows machine and stopped before finishing (four models per frame is slow on CPU; use a GPU box). The first
-  attempt failed on a missing `lap` module (now fixed via `lapx`). Three annotated clips were produced before it
-  was stopped, but their metrics were never inspected. **Do this first**: rerun, open the annotated videos frame by
-  frame, and check (a) base boxes sit on the bags, (b) the green box is on the runner, (c) event captions land on
-  the right frames, (d) primary leads fall roughly in the 10-13 ft range seen in public data. Systematic deviation
-  means the scale tier is wrong; report it, do not tune it away.
+- **Real footage (3 Savant steals of 2B, 2026-06-10/11, CPU, ~28-45 min per clip): 0 of 3 scored.** The pipeline
+  runs end to end; the clips are the problem. Annotated frames were inspected for each:
+  - Happ (game 824346, `no_steal_motion`): the only shot with first base in view is the wide behind-home shot,
+    where the runner is ~30 px tall and never boxed. The rest is the pitcher cam and the slide close-up.
+  - Nunez (823215, `no_steal_motion`): first shot is the pitcher delivery from center field (no first base, no
+    runner); the runner is boxed only in the slide/tag shot at 2B, after he has left first. No lead to measure.
+  - Kiner-Falefa (822970, `no_bases_detected`): four shots (pitcher close-up, delivery, wide, catcher close-up);
+    no base is ever in view, so the empty result is correct.
+  - **Conclusion: Savant steal clips follow the pitch and the throw, not the runner's lead.** The lead/reaction
+    metrics need a view that holds the runner leaving first base in one shot. Threshold tuning or timing stitching
+    cannot create that view. Next real validation needs different footage (full-game broadcast, a first-base or
+    side camera) or a redefined metric (slide timing, pitcher time to plate, catcher pop time).
+- One real defect found and fixed: the shot-cut detector (HSV correlation < 0.55) missed a cut between two
+  similar-colored views (wide -> pitcher cam: correlation 0.756, mean abs pixel change 48.9 vs a typical 3.3).
+  `tracking.is_shot_cut` now also cuts when correlation < 0.90 and the pixel change > 25 gray levels
+  (`shot_cut_soft_corr`, `shot_cut_mad` in `StealConfig`). Happ now splits into 3 shots instead of 2.
+- Not yet checked on real footage: base-box placement beyond the frames above, first-step classifier, event
+  caption timing, and whether a general person detector finds the small runner in the wide shot.
+- Setup note: a clean `pip install -e .` fails `import baseballcv.model` on missing `seaborn` and `tensorboard`
+  (imported by `florence2.py` and `paligemma2.py`; not declared). Install both by hand until declared.
 
 ## Commands
 
@@ -105,8 +119,8 @@ tier with confidence 0.9.
 
 ## Next steps (suggested order)
 
-1. Validate on real footage (above) and fix whatever it exposes; add a recorded-fixture test for anything fixed.
-2. Multi-shot stitching: keep timing across cuts, solve geometry per shot.
+1. Get footage that shows the lead (see verification above) or redefine the metric; Savant steal clips cannot score.
+2. Multi-shot stitching only matters once such footage exists; it will not fix Savant clips.
 3. Surface `homography` and `first_base_xy` through `BaseballTools.analyze_steals` (currently only on `StealAnalyzer`).
 4. Round-3 distractor mining for white-uniformed slides (issue #183) if arrival-phase false positives show up.
 5. Clustering over the per-play table once a few hundred scored plays exist; add pickoffs and steals of 3rd/home later.

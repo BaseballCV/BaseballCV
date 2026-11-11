@@ -286,3 +286,20 @@ class TestStealEvents:
         r = rows[0]
         assert (r["play_id"], r["result"], r["runner_id"], r["runner_name"]) == ("abc", "SB", 5, "R Five")
         assert (r["p_throws"], r["outs"], r["game_pk"]) == ("L", 1, 123)
+
+
+class TestShotCut:
+    """Regression: a wide-shot -> pitcher-cam cut (corr 0.756, mad 48.9) slipped past a corr-only test."""
+
+    def test_hard_cut_by_histogram(self):
+        from baseballcv.functions.utils.baseball_utils.steal_analysis.tracking import is_shot_cut
+        assert is_shot_cut(0.40, 76.1, StealConfig())
+
+    def test_similar_color_cut_caught_by_pixel_change(self):
+        from baseballcv.functions.utils.baseball_utils.steal_analysis.tracking import is_shot_cut
+        assert is_shot_cut(0.756, 48.9, StealConfig())
+
+    def test_same_shot_motion_is_not_a_cut(self):
+        from baseballcv.functions.utils.baseball_utils.steal_analysis.tracking import is_shot_cut
+        assert not is_shot_cut(0.997, 3.3, StealConfig())
+        assert not is_shot_cut(0.85, 9.0, StealConfig())  # fast pan: color shifts, picture barely moves

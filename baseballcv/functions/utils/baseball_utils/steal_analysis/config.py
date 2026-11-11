@@ -19,6 +19,8 @@ class StealConfig:
 
     # --- shots ---
     shot_cut_corr: float = 0.55        # HSV histogram correlation below this = cut
+    shot_cut_soft_corr: float = 0.90   # a cut between similar-colored views only dips to ~0.75 ...
+    shot_cut_mad: float = 25.0         # ... but changes the picture hugely (mean abs gray diff, 0-255)
     min_shot_frames: int = 20
 
     # --- runner identification ---

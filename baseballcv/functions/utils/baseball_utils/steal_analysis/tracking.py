@@ -43,6 +43,13 @@ def hsv_correlation(prev_hist: np.ndarray, hist: np.ndarray) -> float:
     return float(np.corrcoef(a, b)[0, 1])
 
 
+def is_shot_cut(corr: float, mad: float, cfg: StealConfig) -> bool:
+    """Hard cut by color histogram, or a cut between similar-colored views (wide shot to pitcher
+    cam is ~0.75 correlation) caught by a large frame-to-frame pixel change. Pans and zooms move
+    the picture far less than 25 gray levels per frame."""
+    return corr < cfg.shot_cut_corr or (corr < cfg.shot_cut_soft_corr and mad > cfg.shot_cut_mad)
+
+
 class ClipTracker:
     """Runs the base, person/pose, pitcher and ball models over a video."""
 
@@ -88,18 +95,21 @@ class ClipTracker:
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         tracks = ClipTracks(fps=fps, n_frames=0, width=width, height=height)
 
-        shot_start, prev_hist, idx, reset = 0, None, 0, True
+        shot_start, prev_hist, prev_gray, idx, reset = 0, None, None, 0, True
         while True:
             ok, frame = cap.read()
             if not ok:
                 break
-            hsv = cv2.cvtColor(cv2.resize(frame, (160, 90)), cv2.COLOR_BGR2HSV)
+            small = cv2.resize(frame, (160, 90))
+            hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
             hist = cv2.calcHist([hsv], [0, 1], None, [16, 8], [0, 180, 0, 256])
             cv2.normalize(hist, hist)
-            if prev_hist is not None and hsv_correlation(prev_hist, hist) < self.cfg.shot_cut_corr:
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            if prev_hist is not None and is_shot_cut(hsv_correlation(prev_hist, hist),
+                                                     float(np.abs(gray - prev_gray).mean()), self.cfg):
                 tracks.shots.append((shot_start, idx - 1))
                 shot_start, reset = idx, True  # new shot: ByteTrack ids must not carry across a cut
-            prev_hist = hist
+            prev_hist, prev_gray = hist, gray
 
             dets = self._models["base"].predict(frame, conf=self.cfg.base_conf)
             if dets:
