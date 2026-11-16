@@ -4,6 +4,7 @@ video + game_pk in -> clock verdict, calibration, per-play windows and clips out
 """
 from __future__ import annotations
 
+import json
 import os
 from typing import Dict, Optional
 
@@ -112,11 +113,21 @@ class GameSyncRunner:
                     "homography_notes": notes,
                     "fisheye": fisheye_diagnostics(locs),
                 }
+                # persisted so downstream passes (game_metrics) never re-derive it
+                self._persist_calibration(locs, hom, venue_key)
             except Exception as exc:  # calibration must not kill the sync
                 self.logger.warning(f"calibration failed (sync continues without it): {exc}")
                 calibration = {"error": str(exc)}
         else:
             calibration = {"error": f"no base priors for venue '{venue_key}'"}
+
+        # sync provenance for downstream passes (game_metrics): chosen offset,
+        # game identity, venue — small json, written on every successful run
+        self._persist_sync_state(game_pk=game_pk, game_date=str(snap.game_date),
+                                 venue_name=str(snap.header["venue_name"][0]),
+                                 chosen_offset_s=verdict.chosen_offset_s,
+                                 offset_margin=verdict.margin,
+                                 duration_s=duration_s, video_path=video_path)
 
         # 5. Windows + clips
         windows = per_play_windows(play_times, clock, self.config, duration_s=duration_s)
@@ -142,6 +153,28 @@ class GameSyncRunner:
     def _wall_of(hhmmss: str) -> float:
         h, m, s = (int(p) for p in hhmmss.split(":")[:3])
         return h * 3600 + m * 60 + s
+
+    def _persist_calibration(self, locs, hom, venue_key: str) -> None:
+        """Homography + base pixels, so game_metrics never re-derives calibration."""
+        self._persist("calibration.npz",
+                      matrix=hom.matrix,
+                      base_names=np.array(sorted(locs.pixels)),
+                      base_pixels=np.array([locs.pixels[k] for k in sorted(locs.pixels)]),
+                      confidence=np.float64(locs.confidence),
+                      venue=np.array(venue_key))
+
+    def _persist_sync_state(self, *, game_pk: int, game_date: str, venue_name: str,
+                            chosen_offset_s: float, offset_margin: float,
+                            duration_s: float, video_path: str) -> None:
+        state = {"game_pk": game_pk, "game_date": game_date, "venue_name": venue_name,
+                 "chosen_offset_s": chosen_offset_s, "offset_margin": offset_margin,
+                 "duration_s": duration_s, "video_path": os.path.abspath(video_path)}
+        try:
+            with open(os.path.join(self.results_dir, "sync_state.json"), "w",
+                      encoding="utf-8") as f:
+                json.dump(state, f, indent=2)
+        except OSError as exc:
+            self.logger.warning(f"could not persist sync_state.json: {exc}")
 
     def _persist(self, name: str, **arrays) -> None:
         try:

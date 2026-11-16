@@ -4,6 +4,7 @@ All tests run offline: synthetic clock anchors, motion timelines, median
 frames and PBP frames. The real-feed integration lives in
 test_game_sync_integration.py under the `network` marker.
 """
+import json
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -439,6 +440,64 @@ class TestCalibration:
         locs = locate_bases_from_priors(med, bases, CFG)
         with pytest.raises(ValueError):
             build_field_homography(locs)
+
+    def test_field_to_image_round_trip(self):
+        # the inverse mapping must close the loop through the fisheye-style kite
+        bases = {"home": (487.0, 277.0), "second": (516.0, 190.0),
+                 "first": (685.0, 211.0), "third": (342.0, 220.0)}
+        med = _median_with_bases({k: (int(round(v[0])), int(round(v[1]))) for k, v in bases.items()})
+        locs = locate_bases_from_priors(med, bases, CFG)
+        hom, _ = build_field_homography(locs)
+        for name, fpt in FIELD_POINTS.items():
+            img = hom.field_to_image(fpt)
+            assert hom.to_field(img) == pytest.approx(fpt, abs=1e-3), name
+        # and an interior point (midway between home and the mound)
+        img = hom.field_to_image((45.0, 30.0))
+        assert hom.to_field(img) == pytest.approx((45.0, 30.0), abs=1e-3)
+
+
+# ---------------------------------------------------------------- persistence
+class TestPersistence:
+    """calibration.npz + sync_state.json: downstream passes (game_metrics) load
+    these instead of re-deriving homography/offset."""
+
+    _KITE = {"home": (487.0, 277.0), "second": (516.0, 190.0),
+             "first": (685.0, 211.0), "third": (342.0, 220.0)}
+
+    def test_calibration_npz_round_trip(self, tmp_path):
+        import json as _json
+        from baseballcv.functions.utils.baseball_utils.game_sync.runner import GameSyncRunner
+        med = _median_with_bases({k: (int(round(v[0])), int(round(v[1])))
+                                  for k, v in self._KITE.items()})
+        locs = locate_bases_from_priors(med, self._KITE, CFG)
+        hom, _ = build_field_homography(locs)
+        runner = GameSyncRunner(results_dir=str(tmp_path))
+        runner._persist_calibration(locs, hom, "estadio jose bernardo perez")
+        z = np.load(tmp_path / "calibration.npz")
+        assert np.allclose(z["matrix"], hom.matrix)
+        px = dict(zip(z["base_names"].tolist(), [tuple(p) for p in z["base_pixels"]]))
+        assert set(px) == set(self._KITE)
+        for name, (x, y) in self._KITE.items():
+            assert px[name][0] == pytest.approx(x, abs=2.0)
+            assert px[name][1] == pytest.approx(y, abs=2.0)
+        assert float(z["confidence"]) == pytest.approx(locs.confidence)
+        assert str(z["venue"]) == "estadio jose bernardo perez"
+        assert not (tmp_path / "sync_state.json").exists()  # written only by the run
+
+    def test_sync_state_round_trip(self, tmp_path):
+        from baseballcv.functions.utils.baseball_utils.game_sync.runner import GameSyncRunner
+        runner = GameSyncRunner(results_dir=str(tmp_path))
+        runner._persist_sync_state(game_pk=869992, game_date="2026-11-12",
+                                   venue_name="Estadio Jose Bernardo Perez",
+                                   chosen_offset_s=5400.0, offset_margin=1.0,
+                                   duration_s=13138.0, video_path=r"Downloads\1_juego27.mp4")
+        state = json.loads((tmp_path / "sync_state.json").read_text(encoding="utf-8"))
+        assert state["game_pk"] == 869992
+        assert state["game_date"] == "2026-11-12"
+        assert state["chosen_offset_s"] == 5400.0
+        assert state["offset_margin"] == 1.0
+        assert state["venue_name"] == "Estadio Jose Bernardo Perez"
+        assert Path(state["video_path"]).is_absolute()  # provenance stored absolute
 
 
 # ---------------------------------------------------------------- clips

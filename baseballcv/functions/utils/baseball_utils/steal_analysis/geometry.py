@@ -67,8 +67,21 @@ class Homography:
         if self.matrix is None:
             raise ValueError("Could not compute homography from the supplied points")
 
+    @classmethod
+    def from_matrix(cls, matrix) -> "Homography":
+        """Wrap a pre-computed 3x3 matrix (e.g. loaded from game_sync's calibration.npz)."""
+        obj = cls.__new__(cls)
+        obj.matrix = np.asarray(matrix, dtype=np.float64)
+        return obj
+
     def to_field(self, pt: Point) -> Point:
         v = self.matrix @ np.array([pt[0], pt[1], 1.0])
+        return (float(v[0] / v[2]), float(v[1] / v[2]))
+
+    def field_to_image(self, pt: Point) -> Point:
+        """Inverse mapping (field feet -> image px) via the inverted matrix."""
+        inv = np.linalg.inv(self.matrix)
+        v = inv @ np.array([pt[0], pt[1], 1.0])
         return (float(v[0] / v[2]), float(v[1] / v[2]))
 
 
