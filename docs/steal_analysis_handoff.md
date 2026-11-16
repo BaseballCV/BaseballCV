@@ -126,6 +126,50 @@ tier with confidence 0.9.
 5. Clustering over the per-play table once a few hundred scored plays exist; add pickoffs and steals of 3rd/home later.
 6. Open the PR for this branch; CI runs `pytest.yml` on `baseballcv/**` and `tests/**` changes.
 
+## Game video <-> PBP sync (feat/game-video-sync, verified 2026-11-16)
+
+The "footage that shows the lead" problem is solved: a full-game **cenital** feed
+(854x480 @30, fisheye behind-home, `1_juego27_2026-11-12.mp4`, La Guaira @ Magallanes)
+syncs to the LVBP DB. Branch `feat/game-video-sync` adds
+`baseballcv/functions/utils/baseball_utils/game_sync/` (config/pbp/clock/activity/
+sync/calibration/clips/runner) + `BaseballTools.sync_game_video(video_path, game_pk)`.
+Verified end to end on game 869992: **103/103 per-event clips cut**, both spike-checked
+HRs land inside their windows, clip frames read the burned-in overlay dead-on.
+
+Facts about that feed you must not re-derive:
+
+- **DB clock is 90:00 behind the burned-in overlay**, constant, intervals agreeing
+  within ~3 s/segment (worst 23 s in one late-game frame-drop gap). 215 OCR anchors,
+  98% parse; the overlay oscillates +-3600 s between video 5280-8820 s (NTP/DST toggle)
+  -> piecewise anchor map with fold, never a global linear fit.
+- **Activity cannot discover the offset** on this feed: the game fills the whole file,
+  so energy at mapped pitch times is elevated (z ~ 2.5) at EVERY candidate offset, and
+  the detectable bursts are inning transitions/crowd reactions, not pitch releases
+  (pitch motion is invisible at this resolution; HR bursts lag 4-7 s). The offset comes
+  from INTERVAL FIT: DB first pitch must land in the lead-in, last pitch in the tail,
+  mapped walls inside the anchor range. For a full-game recording exactly one candidate
+  fits. scripts/diag_energy.py + diag_onsets3.py record the negative results.
+- Mean frame-diff is unusable (compression flicker, median ~0.8 gray levels, bursts
+  peak ~3). The working signal is the FRACTION of infield-ROI pixels changing >3
+  levels, with a 20 s rolling-median floor + MAD threshold (~260 onsets/game).
+- **pitch_by_pitch.plate_appearance is a lineup slot (1..~10) that keeps counting
+  across half-innings** (top-2nd ends at pa 7, bottom-2nd starts at pa 7). It matches
+  neither play_log_events.at_bat_index (0..79) nor arithmetic of it. Join on the PA
+  ORDINAL within its half-inning. This cost a day; the regression tests encode it.
+- ssh SQL must be whitespace-collapsed + shlex-quoted BEFORE passing to ssh (newlines
+  get executed by the remote shell). DB reads stay sudo -u www-data mode=ro (WAL).
+- Bases: 4/4 recovered within 5 px of the venue priors (`VENUE_BASE_PRIORS` in
+  runner.py, keyed by lowercase venue_name); fisheye kite_ratio 3.73 -> homography,
+  not similarity. On-deck circles are the main false-positive source.
+- Stages are cached per video in results_dir (anchors npz, timeline npz, pbp parquet):
+  anchor OCR ~10 min, timeline grab ~6 min; a re-run is ~1 min + clip cutting.
+
+Known limits: onset matching is a diagnostic only (~10% at 3 s tol, expected);
+`min_margin_frac` refusal path returns candidates instead of clips; partial recordings
+(video shorter than the game span) fail the interval fit loudly; StealAnalyzer is NOT
+yet wired to these clips (next pass: homography lead distance + blob timing, pose is
+hopeless at 5-10 px).
+
 ## Repo and infrastructure facts (from the wider #183 work)
 
 - Git: `origin` is the SSH URL (`git@github.com:BaseballCV/BaseballCV.git`). HTTPS pushes used a stale PAT in the
