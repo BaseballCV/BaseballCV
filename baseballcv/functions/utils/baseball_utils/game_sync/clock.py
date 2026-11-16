@@ -11,9 +11,11 @@ Findings from the Magallanes feed (scripts/spike_s1*.py) that shape this module:
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Optional, Sequence
 
 import cv2
@@ -91,8 +93,28 @@ class BurnedClockReader:
         return ClockAnchor(video_time_s=video_time_s, wall_s=float(secs), raw_text=text)
 
     # ------------------------------------------------------------------
-    def build_anchors(self, video_path: str, duration_s: Optional[float] = None) -> list[ClockAnchor]:
-        """Sample the whole file every ocr_step_s; retry once at +1 s on failure."""
+    def build_anchors(self, video_path: str, duration_s: Optional[float] = None,
+                      cache_dir: Optional[str] = None) -> list[ClockAnchor]:
+        """Sample the whole file every ocr_step_s; retry once at +1 s on failure.
+
+        Anchor OCR is the slowest stage of the pipeline (~10 min per pass on a
+        3.6 h file), so results are cached per video in ``cache_dir`` when given.
+        """
+        cache = None
+        if cache_dir:
+            try:
+                key = (f"{Path(video_path).stem}_{os.path.getsize(video_path)}"
+                       f"_{int(duration_s or 0)}_{int(self.config.ocr_step_s)}")
+                cache = Path(cache_dir) / f"clock_anchors_{key}.npz"
+                if cache.exists():
+                    z = np.load(cache, allow_pickle=False)
+                    anchors = [ClockAnchor(video_time_s=float(v), wall_s=float(wl), raw_text=str(txt))
+                               for v, wl, txt in zip(z["video_s"], z["wall_s"], z["text"])]
+                    self.logger.info(f"{len(anchors)} clock anchors (cached) from {cache.name}")
+                    return anchors
+            except OSError:
+                cache = None
+
         cap = cv2.VideoCapture(video_path)
         fps = cap.get(cv2.CAP_PROP_FPS)
         if duration_s is None:
@@ -111,6 +133,14 @@ class BurnedClockReader:
                 self.logger.warning(f"no clock read at video {t:.0f}s")
             t += self.config.ocr_step_s
         cap.release()
+        if cache is not None:
+            try:
+                np.savez_compressed(cache,
+                                    video_s=np.array([a.video_time_s for a in anchors]),
+                                    wall_s=np.array([a.wall_s for a in anchors]),
+                                    text=np.array([a.raw_text for a in anchors]))
+            except OSError:
+                pass
         self.logger.info(f"{len(anchors)} clock anchors from {video_path} "
                          f"({100 * len(anchors) / max(1, duration_s / self.config.ocr_step_s):.0f}% of samples)")
         return anchors

@@ -34,7 +34,14 @@ class MotionTimeline:
 
 def motion_timeline(video_path: str, config: Optional[GameSyncConfig] = None,
                     logger=None) -> MotionTimeline:
-    """Downscaled frame-diff energy sampled at activity_fps."""
+    """Fraction-of-changing-pixels signal sampled at activity_fps.
+
+    Measured on the Magallanes feed: the MEAN abs frame-diff is dominated by
+    compression flicker (median ~0.8 gray levels, pitch bursts peak ~3) and
+    cannot be thresholded; the FRACTION of ROI pixels changing more than
+    ``activity_diff_thresh`` gray levels sits near 0.03 at rest and spikes
+    5x at gameplay events, which thresholds cleanly.
+    """
     cfg = config or GameSyncConfig()
     logger = logger or BaseballCVLogger.get_logger("motion_timeline")
     cap = cv2.VideoCapture(video_path)
@@ -57,7 +64,8 @@ def motion_timeline(video_path: str, config: Optional[GameSyncConfig] = None,
                 gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
                 gray = cv2.resize(gray, None, fx=cfg.activity_downscale, fy=cfg.activity_downscale)
                 if prev is not None:
-                    energies.append(float(np.abs(gray.astype(np.int16) - prev).mean()))
+                    diff = np.abs(gray.astype(np.int16) - prev)
+                    energies.append(float((diff > cfg.activity_diff_thresh).mean()))
                     times.append(idx / fps)
                 prev = gray
         idx += 1
@@ -67,8 +75,11 @@ def motion_timeline(video_path: str, config: Optional[GameSyncConfig] = None,
 
 
 def detect_onsets(timeline: MotionTimeline, config: Optional[GameSyncConfig] = None) -> pl.DataFrame:
-    """Motion bursts: energy leaving a rolling-median floor, sustained briefly.
+    """Motion bursts over a long rolling-median floor with MAD noise scaling.
 
+    The floor window is deliberately long (~20 s): pitch bursts must NOT lift
+    their own threshold (the original 2 s window did exactly that and detected
+    nothing on real footage). Threshold = floor + max(MAD*mult, floor_add).
     Same walk-back-to-floor idea as steal_analysis.events.sustained_onset.
     """
     cfg = config or GameSyncConfig()
@@ -76,16 +87,23 @@ def detect_onsets(timeline: MotionTimeline, config: Optional[GameSyncConfig] = N
     t = timeline.times_s
     if len(e) < 10:
         return pl.DataFrame({"time_s": [], "strength": []})
-    k = max(3, int(round(2.0 * timeline.fps_sample)))  # ~2 s rolling window
+    k = max(3, int(round(cfg.onset_floor_window_s * timeline.fps_sample)))
     med = pl.Series(e).rolling_median(window_size=min(k, len(e))).to_numpy()
-    above = e > np.maximum(med * cfg.onset_min_strength, med + 1.0)
+    # leading window positions come back as nulls: use nan-aware stats and let
+    # the NaN thresholds simply compare False
+    resid = e - med
+    finite = resid[np.isfinite(resid)]
+    mad = float(np.median(np.abs(finite - np.median(finite)))) * 1.4826 if len(finite) else 0.0
+    thr = med + np.maximum(mad * cfg.onset_noise_mult, cfg.onset_floor_add)
+    above = e > thr
     sustain = max(1, int(round(cfg.onset_sustain_s * timeline.fps_sample)))
     rows = []
     i = 1
     while i < len(e) - sustain:
         if above[i] and not above[i - 1]:
             if above[i:i + sustain].all():
-                rows.append({"time_s": float(t[i]), "strength": float(e[i] / max(med[i], 1e-9))})
+                rows.append({"time_s": float(t[i]),
+                             "strength": float((e[i] - med[i]) / max(thr[i] - med[i], 1e-9))})
                 i += sustain
         i += 1
     return pl.DataFrame(rows)

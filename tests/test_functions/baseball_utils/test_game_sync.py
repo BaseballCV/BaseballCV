@@ -123,18 +123,55 @@ class TestResolveOffset:
         # db_wall such that video_at(db_wall + offset) == video_time
         return [base + t - offset_s for t in video_times]
 
-    def test_picks_true_offset_and_rejects_decoys(self):
-        cmap, base = _cmap()
+    def _wide_cmap(self, span=7200.0):
+        """Anchors every 60 s over `span` s, base wall 18:00:00."""
+        base = 18 * 3600
+        anchors = [_anchor(float(t), float(base + t)) for t in np.arange(0, span + 1, 60.0)]
+        return ClockMap.from_anchors(anchors, GAME_DATE, CFG), base
+
+    def test_interval_fit_picks_true_offset_and_rejects_decoys(self):
+        cmap, base = self._wide_cmap()
         true_off = 90 * 60.0
-        pitch_video = [50.0, 150.0, 250.0, 350.0, 450.0, 550.0, 650.0]
-        walls = self._pitch_walls(base, pitch_video, true_off)
-        tl = _timeline_with_bursts(pitch_video)
-        verdict = resolve_offset(cmap, walls, tl, CFG)
+        # full-game shape: first pitch 10 s in, last pitch 20 s before EOF
+        walls = self._pitch_walls(base, [10.0, 700.0], true_off)
+        verdict = resolve_offset(cmap, walls, 720.0, None, CFG)
+        assert verdict.chosen_offset_s == true_off
+        assert verdict.margin == pytest.approx(1.0)          # sole feasible candidate
+        feas = {r["offset_min"]: r["feasible"] for r in verdict.candidates.to_dicts()}
+        assert feas[90] is np.True_ or feas[90] is True
+        for m in (-120, -60, -30, 0, 30, 60, 120):
+            assert not feas[m], f"offset {m:+d} must be infeasible"
+
+    def test_no_feasible_candidate_refuses(self):
+        cmap, base = self._wide_cmap()
+        # DB span wider than the recording: nothing can fit
+        walls = self._pitch_walls(base, [10.0, 7000.0], 90 * 60.0)
+        verdict = resolve_offset(cmap, walls, 720.0, None, CFG)
+        assert verdict.margin == 0.0
+        assert "NO candidate" in verdict.reason
+
+    def test_multiple_feasible_activity_tiebreak(self):
+        import dataclasses
+        cmap, base = self._wide_cmap()
+        true_off = 90 * 60.0
+        # candidates are 1800 s apart, so two can fit only when the tail pad
+        # exceeds that spacing; duration 2000 puts both (+90 -> 100..160 s,
+        # +120 -> 1900..1960 s) inside the anchor range and the pads
+        cfg2 = dataclasses.replace(CFG, sync_pad_max_s=3000.0, sync_pad_end_s=3600.0)
+        walls = self._pitch_walls(base, [100.0, 160.0], true_off)
+        tl = _timeline_with_bursts([100.0, 160.0])           # bursts at the true mapping
+        verdict = resolve_offset(cmap, walls, 2000.0, tl, cfg2)
         assert verdict.chosen_offset_s == true_off
         assert verdict.margin >= CFG.min_margin_frac
-        scores = {r["offset_min"]: r["matched_frac"] for r in verdict.candidates.to_dicts()}
-        assert scores[90] > scores[0]
-        assert scores[90] > scores[30] and scores[90] > scores[120]
+
+    def test_multiple_feasible_low_margin_flagged(self):
+        import dataclasses
+        cmap, base = self._wide_cmap()
+        cfg2 = dataclasses.replace(CFG, sync_pad_max_s=3000.0, sync_pad_end_s=3600.0)
+        walls = self._pitch_walls(base, [100.0, 160.0], 90 * 60.0)
+        flat = MotionTimeline(np.arange(0, 2000, 0.2), np.full(10000, 1.0), 5.0)
+        verdict = resolve_offset(cmap, walls, 2000.0, flat, cfg2)
+        assert "LOW MARGIN" in verdict.reason
 
     def test_refine_offsets_small_shift(self):
         cmap, base = _cmap()
@@ -143,13 +180,10 @@ class TestResolveOffset:
         walls = self._pitch_walls(base, pitch_video, true_off + shift)
         tl = _timeline_with_bursts(pitch_video)
         clock = refine_offset(GameClock(clock_map=cmap, offset_s=true_off), walls, tl, CFG)
-        assert abs(clock.offset_s - (true_off + shift)) <= CFG.refine_step_s * 1.01
-
-    def test_low_margin_flagged(self):
-        cmap, base = _cmap()
-        walls = [base + 100.0, base + 200.0]
-        verdict = resolve_offset(cmap, walls, MotionTimeline(np.arange(0, 60, 0.2), np.full(300, 1.0), 5.0), CFG)
-        assert verdict.reason and "LOW MARGIN" in verdict.reason
+        # refine minimizes pitch->onset distance, so it converges to the shift
+        # up to onset quantization (first above-floor sample ~1 s before the
+        # burst peak at 5 fps), not to the 0.25 s refine grid
+        assert abs(clock.offset_s - (true_off + shift)) <= 1.0
 
 
 class TestPerPlayWindows:
@@ -189,7 +223,7 @@ class TestPerPlayWindows:
 # ---------------------------------------------------------------- pbp
 def _snapshot():
     events = pl.DataFrame({
-        "event_seq": [1, 2], "at_bat_index": [1, 1], "inning": [1, 1],
+        "event_seq": [1, 2], "at_bat_index": [0, 0], "inning": [1, 1],
         "is_top_inning": [True, True], "event_type": ["strikeout", None],
         "event_text": ["KS", "SB"], "is_pa": [True, False], "is_ab": [True, False],
         "batter_id": [5, 5], "batter_name": ["B", "B"], "bat_side": ["R", "R"],
@@ -228,12 +262,85 @@ class TestPlayTimes:
         assert r["pa_first_pitch_time_dt"] == datetime(2026, 11, 12, 19, 0, 10)
         assert r["pa_last_pitch_time_dt"] == datetime(2026, 11, 12, 19, 1, 0)
 
+    def test_plate_appearance_is_1based_vs_at_bat_index(self):
+        # regression for the real-game bug: pitch_by_pitch.plate_appearance
+        # runs 1..80 while play_log_events.at_bat_index runs 0..79; the join
+        # must align pa-1 <-> abi, and consecutive PAs must both get times
+        snap = _snapshot()
+        snap.events = pl.DataFrame({
+            "event_seq": [1, 2], "at_bat_index": [0, 1], "inning": [1, 1],
+            "is_top_inning": [True, True], "event_type": ["strikeout", "single"],
+            "event_text": ["KS", "1B7"], "is_pa": [True, True], "is_ab": [True, True],
+            "batter_id": [5, 6], "batter_name": ["B", "B2"], "bat_side": ["R", "R"],
+            "pitcher_id": [9, 9], "pitcher_name": ["P", "P"], "pitch_hand": ["R", "R"],
+            "outs_before": [0, 1], "outs_after": [1, 1], "r1_before": [None, None],
+            "r2_before": [None, None], "r3_before": [None, None], "r1_after": [None, 5],
+            "r2_after": [None, None], "r3_after": [None, None],
+            "base_state_before": [0, 1], "base_state_after": [1, 1],
+            "away_score_before": [0, 0], "home_score_before": [0, 0],
+            "away_score_after": [0, 0], "home_score_after": [0, 0],
+            "balls": [1, 0], "strikes": [2, 0],
+        })
+        snap.pitches = pl.DataFrame({
+            "no": [1, 2, 3, 4], "time": ["19:00:10", "19:01:00", "19:02:10", "19:02:40"],
+            "plate_appearance": [1, 1, 2, 2], "inning": [1, 1, 1, 1],
+            "half_inning": ["Top"] * 4, "is_top_inning": [True] * 4,
+            "pitcher_name": ["P"] * 4, "batter_name": ["B", "B", "B2", "B2"],
+            "balls": [0, 1, 0, 0], "strikes": [0, 1, 0, 1], "outs": [0, 0, 1, 1],
+            "pitch_type": ["FF"] * 4, "pitch_call": ["B", "X", "B", "S"],
+            "play_result": ["", "KS", "", ""],
+        })
+        pt = snap.play_times().sort("event_seq")
+        assert pt["pa_first_pitch_time_dt"].to_list() == [
+            datetime(2026, 11, 12, 19, 0, 10), datetime(2026, 11, 12, 19, 2, 10)]
+
+    def test_pa_continues_across_half_innings(self):
+        # regression for the real-game bug: pitch_by_pitch.plate_appearance is
+        # a lineup slot that keeps counting across halves (top-2nd ended at
+        # pa 7, bottom-2nd starts at pa 7), so no arithmetic on the value can
+        # map it to at_bat_index — the PA ordinal within the half must be used
+        snap = _snapshot()
+        snap.events = pl.DataFrame({
+            "event_seq": [1, 2, 3], "at_bat_index": [0, 1, 2], "inning": [2, 2, 2],
+            "is_top_inning": [True, True, False], "event_type": ["strikeout", "single", "single"],
+            "event_text": ["KS", "1B7", "1B7"], "is_pa": [True, True, True],
+            "is_ab": [True, True, True], "batter_id": [5, 6, 7],
+            "batter_name": ["B", "B2", "B3"], "bat_side": ["R", "R", "R"],
+            "pitcher_id": [9, 9, 9], "pitcher_name": ["P", "P", "P"], "pitch_hand": ["R", "R", "R"],
+            "outs_before": [0, 1, 0], "outs_after": [1, 2, 1],
+            "r1_before": [None, None, None], "r2_before": [None, None, None],
+            "r3_before": [None, None, None], "r1_after": [None, 5, 6],
+            "r2_after": [None, None, None], "r3_after": [None, None, None],
+            "base_state_before": [0, 1, 0], "base_state_after": [1, 1, 1],
+            "away_score_before": [0, 0, 0], "home_score_before": [0, 0, 0],
+            "away_score_after": [0, 0, 0], "home_score_after": [0, 0, 0],
+            "balls": [1, 0, 0], "strikes": [2, 0, 0],
+        })
+        snap.pitches = pl.DataFrame({
+            "no": [1, 2, 3, 4, 5],
+            "time": ["18:00:10", "18:01:00", "18:05:10", "18:05:40", "18:06:00"],
+            "plate_appearance": [6, 7, 7, 8, 8],       # 7 spans both halves
+            "inning": [2, 2, 2, 2, 2],
+            "half_inning": ["Top", "Top", "Bottom", "Bottom", "Bottom"],
+            "is_top_inning": [True, True, False, False, False],
+            "pitcher_name": ["P"] * 5, "batter_name": ["B", "B2", "B3", "B3", "B4"],
+            "balls": [0] * 5, "strikes": [0] * 5, "outs": [0, 1, 0, 0, 0],
+            "pitch_type": ["FF"] * 5, "pitch_call": ["X", "X", "B", "X", "B"],
+            "play_result": ["KS", "1B7", "", "KS", ""],
+        })
+        pt = snap.play_times().sort("event_seq")
+        assert pt["pa_first_pitch_time_dt"].to_list() == [
+            datetime(2026, 11, 12, 18, 0, 10),   # top 1st PA (pa 6, ordinal 1)
+            datetime(2026, 11, 12, 18, 1, 0),    # top 2nd PA (pa 7, ordinal 2)
+            datetime(2026, 11, 12, 18, 5, 10),   # bottom 1st PA (pa 7 again, ordinal 1)
+        ]
+
     def test_midnight_rollover_pushes_next_day(self):
         snap = _snapshot()
         # two PAs: one pitching at 23:59:00, the next at 00:00:30 next day
         snap.pitches = pl.DataFrame({
             "no": [1, 2], "time": ["23:59:00", "00:00:30"],
-            "plate_appearance": [9, 10], "inning": [10, 10],
+            "plate_appearance": [10, 11], "inning": [10, 10],
             "half_inning": ["Top", "Top"], "is_top_inning": [True, True],
             "pitcher_name": ["P", "P"], "batter_name": ["B", "B"],
             "balls": [0, 0], "strikes": [0, 0], "outs": [0, 0],
@@ -269,10 +376,13 @@ class TestPBPClientSafety:
         client = PBPClient(CFG, cache_dir=str(Path.cwd() / "_pbp_test_cache"))
         with pytest.raises(RuntimeError):
             client._query("SELECT 1")
-        cmd = seen["cmd"]
-        assert "mode=ro" in " ".join(cmd)
+        cmd = " ".join(seen["cmd"])
+        assert "mode=ro" in cmd
         assert "www-data" in cmd
         assert "sudo" in cmd
+        # the SQL must be one shell-quoted word for the remote shell: a
+        # multi-line SQL previously got executed line-by-line by remote bash
+        assert "sqlite3 -json" in cmd
 
 
 # ---------------------------------------------------------------- calibration

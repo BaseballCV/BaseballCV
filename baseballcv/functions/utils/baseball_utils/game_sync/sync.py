@@ -49,34 +49,88 @@ class GameClock:
 
 
 def resolve_offset(clock_map: ClockMap, db_pitch_walls: Sequence[float],
-                   timeline: MotionTimeline, config: Optional[GameSyncConfig] = None,
+                   duration_s: float, timeline: Optional[MotionTimeline] = None,
+                   config: Optional[GameSyncConfig] = None,
                    logger=None) -> OffsetVerdict:
-    """Score each candidate constant offset by pitch/onset alignment.
+    """Choose the DB-clock offset that maps the game onto the recording.
 
-    db_pitch_walls: seconds-of-day per pitch on the DB clock (from pitch_by_pitch.time).
+    Measured on the Magallanes feed (2026-11-12): activity CANNOT discover the
+    offset on a continuous single-camera feed — the game fills the whole file,
+    so under ANY constant offset the mapped pitch instants land on moving
+    players (aggregate energy z ~ 2.5 at every candidate), and the detectable
+    bursts are inning transitions and crowd reactions, not pitch releases
+    (0.2-0.5 s pitch motion is invisible; HR bursts lag 4-7 s). The decisive,
+    activity-free constraint is INTERVAL FIT: the DB first pitch must land
+    within the recording's lead-in and the DB last pitch within the tail.
+    For a full-game recording exactly one candidate fits. Activity matching is
+    still computed when a timeline is given (as a reported diagnostic, and as
+    the tie-breaker if several candidates fit).
     """
     cfg = config or GameSyncConfig()
     logger = logger or BaseballCVLogger.get_logger("resolve_offset")
-    onsets = detect_onsets(timeline, cfg)
+    onsets = detect_onsets(timeline, cfg) if timeline is not None else None
+    if onsets is not None:
+        logger.info(f"activity onsets detected: {len(onsets)} (diagnostic only)")
+    walls = sorted(set(db_pitch_walls))
+    if not walls:
+        return OffsetVerdict(chosen_offset_s=0.0, candidates=pl.DataFrame(
+            {"offset_min": [], "offset_s": [], "feasible": [], "matched_frac": []}),
+            runner_up_offset_s=None, margin=0.0,
+            reason="no DB pitch times to validate against")
+
     rows = []
+    w_lo, w_hi = float(clock_map.wall_times[0]), float(clock_map.wall_times[-1])
     for minutes in cfg.offset_candidates_min:
         off = minutes * 60.0
-        video_times = np.array([clock_map.video_at(w + off) for w in db_pitch_walls])
-        score = activity_match_score(video_times, onsets, cfg.onset_match_tol_s)
-        rows.append({"offset_min": minutes, "offset_s": off, "matched_frac": score})
-    cand = pl.DataFrame(rows).sort("matched_frac", descending=True)
-    best = cand.row(0, named=True)
-    runner = cand.row(1, named=True) if len(cand) > 1 else None
-    margin = best["matched_frac"] - (runner["matched_frac"] if runner else 0.0)
-    reason = (f"offset {best['offset_min']:+d} min matched {best['matched_frac']:.0%} of pitches "
-              f"to activity onsets within {cfg.onset_match_tol_s:.0f} s")
-    if runner is not None:
-        reason += f" (runner-up {runner['offset_min']:+d} min at {runner['matched_frac']:.0%})"
-    if margin < cfg.min_margin_frac:
-        reason += " — LOW MARGIN; do not trust this sync"
+        # interiority: mapped walls must fall inside the observed anchor range.
+        # np.interp clamps outside it (-> video 0 or duration), which would
+        # let out-of-range candidates masquerade as feasible fits.
+        interior = (walls[0] + off) >= w_lo and (walls[-1] + off) <= w_hi
+        v_first = clock_map.video_at(walls[0] + off)
+        v_last = clock_map.video_at(walls[-1] + off)
+        feasible = (interior and 0.0 <= v_first <= cfg.sync_pad_max_s and
+                    duration_s - cfg.sync_pad_end_s <= v_last <= duration_s + 1.0)
+        mf = (activity_match_score(np.array([clock_map.video_at(w + off) for w in walls]),
+                                   onsets, cfg.onset_match_tol_s)
+              if onsets is not None else None)
+        rows.append({"offset_min": minutes, "offset_s": off,
+                     "feasible": feasible, "matched_frac": mf})
+    cand = pl.DataFrame(rows)
+    feas = cand.filter(pl.col("feasible")).sort(
+        "matched_frac", descending=True, nulls_last=True)
+
+    if feas.is_empty():
+        best = cand.sort("matched_frac", descending=True, nulls_last=True).row(0, named=True)
+        reason = (f"NO candidate offset maps the DB game span onto the recording "
+                  f"(first pitch {clock_map.video_at(walls[0] + best['offset_s']):.0f} s, "
+                  f"last pitch {clock_map.video_at(walls[-1] + best['offset_s']):.0f} s of "
+                  f"{duration_s:.0f} s at the best candidate {best['offset_min']:+d} min) "
+                  "— the recording may be partial; do not trust this sync")
         logger.warning(reason)
+        return OffsetVerdict(chosen_offset_s=best["offset_s"], candidates=cand,
+                             runner_up_offset_s=None, margin=0.0, reason=reason)
+
+    best = feas.row(0, named=True)
+    runner = feas.row(1, named=True) if len(feas) > 1 else None
+    vf = clock_map.video_at(walls[0] + best["offset_s"])
+    vl = clock_map.video_at(walls[-1] + best["offset_s"])
+    reason = (f"offset {best['offset_min']:+d} min: interval fit maps DB first pitch to "
+              f"video {vf:.0f} s and last pitch to {vl:.0f} s of {duration_s:.0f} s")
+    if runner is not None:
+        mf_best, mf_run = best["matched_frac"] or 0.0, runner["matched_frac"] or 0.0
+        margin = mf_best - mf_run
+        reason += (f" (runner-up {runner['offset_min']:+d} min also fits; "
+                   f"activity match {mf_best:.0%} vs {mf_run:.0%})")
+        if margin < cfg.min_margin_frac:
+            reason += " — LOW MARGIN; do not trust this sync"
+            logger.warning(reason)
+            return OffsetVerdict(chosen_offset_s=best["offset_s"], candidates=cand,
+                                 runner_up_offset_s=runner["offset_s"], margin=margin,
+                                 reason=reason)
     else:
-        logger.info(reason)
+        margin = 1.0
+        reason += " — the only candidate that fits the recording"
+    logger.info(reason)
     return OffsetVerdict(chosen_offset_s=best["offset_s"], candidates=cand,
                          runner_up_offset_s=runner["offset_s"] if runner else None,
                          margin=margin, reason=reason)

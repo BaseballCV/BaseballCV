@@ -13,11 +13,11 @@ from baseballcv.utilities import BaseballCVLogger
 
 from .activity import motion_timeline
 from .calibration import build_field_homography, fisheye_diagnostics, locate_bases_from_priors, median_frame
-from .clips import cut_clips
+from .clips import cut_clips as _cut_clips
 from .clock import BurnedClockReader, ClockMap
 from .config import GameSyncConfig
 from .pbp import PBPClient
-from .sync import GameClock, per_play_windows, refine_offset, resolve_offset, validation_report
+from .sync import GameClock, per_play_windows, resolve_offset, validation_report
 
 # Spike-verified base priors for Magallanes park (854x480 cenital feed, 2026-11-12).
 # Other venues: annotate one frame and add an entry here (venue key = venue_name
@@ -57,16 +57,44 @@ class GameSyncRunner:
         pitch_walls = [self._wall_of(r["time"]) for r in
                        snap.pitches.filter(snap.pitches["time"].is_not_null()).iter_rows(named=True)]
 
-        # 2. Burned-in clock anchors -> piecewise map
+        # 2. Burned-in clock anchors -> piecewise map (persisted for debugging:
+        #    anchor OCR is the slowest stage, never recompute to diagnose)
         reader = BurnedClockReader(self.config, logger=self.logger)
-        anchors = reader.build_anchors(video_path, duration_s=duration_s)
+        anchors = reader.build_anchors(video_path, duration_s=duration_s,
+                                       cache_dir=self.results_dir)
+        self._persist("clock_anchors.npz", video_s=np.array([a.video_time_s for a in anchors]),
+                      wall_s=np.array([a.wall_s for a in anchors]))
         clock_map = ClockMap.from_anchors(anchors, snap.game_date, self.config)
 
-        # 3. Activity timeline + offset resolution/validation
-        timeline = motion_timeline(video_path, self.config, logger=self.logger)
-        verdict = resolve_offset(clock_map, pitch_walls, timeline, self.config, logger=self.logger)
+        # 3. Activity timeline + offset resolution/validation.
+        #    The timeline is a reported diagnostic: on a continuous single-camera
+        #    feed activity cannot discover the offset (see sync.resolve_offset).
+        #    Cached per video: the full-file grab pass costs ~6 min.
+        from .activity import MotionTimeline
+        tcache = os.path.join(self.results_dir,
+                              f"motion_timeline_{os.path.splitext(os.path.basename(video_path))[0]}_"
+                              f"{os.path.getsize(video_path)}.npz")
+        timeline = None
+        if os.path.exists(tcache):
+            try:
+                z = np.load(tcache)
+                timeline = MotionTimeline(z["time_s"], z["energy"], float(z["fps"]))
+                self.logger.info(f"motion timeline (cached) from {os.path.basename(tcache)}")
+            except (OSError, KeyError, ValueError):
+                timeline = None
+        if timeline is None:
+            timeline = motion_timeline(video_path, self.config, logger=self.logger)
+            self._persist(os.path.basename(tcache), time_s=timeline.times_s,
+                          energy=timeline.energy, fps=np.float64(timeline.fps_sample))
+        verdict = resolve_offset(clock_map, pitch_walls, duration_s, timeline,
+                                 self.config, logger=self.logger)
+        if verdict.margin < self.config.min_margin_frac:
+            # never cut clips against an untrusted sync: fail loudly with the
+            # candidate table so the offset question can be settled offline
+            return {"error": f"offset unresolved: {verdict.reason}",
+                    "offset_verdict": {"candidates": verdict.candidates.to_pandas().to_dict("records")},
+                    "artifacts_dir": self.results_dir}
         clock = GameClock(clock_map=clock_map, offset_s=verdict.chosen_offset_s)
-        clock = refine_offset(clock, pitch_walls, timeline, self.config)
         report = validation_report(pitch_walls, clock, timeline, self.config)
 
         # 4. Calibration (bases near venue priors on a quiescent median frame)
@@ -94,7 +122,8 @@ class GameSyncRunner:
         windows = per_play_windows(play_times, clock, self.config, duration_s=duration_s)
         manifest = None
         if cut_clips and not windows.is_empty():
-            manifest = cut_clips(video_path, windows, self.results_dir, self.config, logger=self.logger)
+            manifest = _cut_clips(video_path, windows, self.results_dir, self.config,
+                                  logger=self.logger)
 
         return {
             "game_pk": game_pk,
@@ -113,3 +142,9 @@ class GameSyncRunner:
     def _wall_of(hhmmss: str) -> float:
         h, m, s = (int(p) for p in hhmmss.split(":")[:3])
         return h * 3600 + m * 60 + s
+
+    def _persist(self, name: str, **arrays) -> None:
+        try:
+            np.savez_compressed(os.path.join(self.results_dir, name), **arrays)
+        except OSError as exc:
+            self.logger.warning(f"could not persist {name}: {exc}")

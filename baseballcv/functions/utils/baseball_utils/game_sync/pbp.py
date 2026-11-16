@@ -13,6 +13,7 @@ SAFETY CONTRACT (learned from the platform's WAL setup):
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -66,23 +67,37 @@ class GameSnapshot:
         """Per-event DB wall-clock datetimes.
 
         play_log_events has no time column; the time of an event is taken from
-        its plate appearance's first pitch (pitch_by_pitch.time is HH:MM:SS on
-        the game's local day — anchored to the header date, with a day
-        rollover guard for extra-inning games past midnight).
+        its plate appearance's first pitch. NOTE (measured on game 869992):
+        pitch_by_pitch.plate_appearance is a LINEUP SLOT (1..~10) that keeps
+        counting across half-innings (top-2nd ends at pa 7, bottom-2nd starts
+        at pa 7) and matches neither play_log_events.at_bat_index (0..79,
+        game-wide) nor any arithmetic of it. The stable correspondence is the
+        ORDINAL of the PA inside its half-inning, which is chronological on
+        both sides. pitch_by_pitch.time is HH:MM:SS on the game's local day —
+        anchored to the header date, with a day rollover guard for extra-
+        inning games past midnight.
         """
-        pitches = self.pitches.with_columns(
-            pl.col("plate_appearance").cast(pl.Int64, strict=False).alias("at_bat_index")
-        )
-        first_pitch = (
-            pitches.filter(pl.col("time").is_not_null())
-            .group_by(["inning", "is_top_inning", "at_bat_index"])
-            .agg(pl.col("time").sort_by("no").first().alias("pa_first_pitch_time"),
-                 pl.col("time").sort_by("no", descending=True).first().alias("pa_last_pitch_time"))
+        pitches = self.pitches.filter(pl.col("time").is_not_null())
+        pa = (
+            pitches.sort("no")
+            .group_by(["inning", "is_top_inning", "plate_appearance"])
+            .agg(pl.col("time").first().alias("pa_first_pitch_time"),
+                 pl.col("time").last().alias("pa_last_pitch_time"))
+            .sort(["inning", "is_top_inning", "plate_appearance"])
+            .with_columns(pl.col("plate_appearance").rank("dense")
+                          .over(["inning", "is_top_inning"]).alias("pa_ordinal"))
+            .drop("plate_appearance")
         )
         ev = self.events.with_columns(pl.col("at_bat_index").cast(pl.Int64, strict=False))
-        joined = ev.join(
-            first_pitch, on=["inning", "is_top_inning", "at_bat_index"], how="left"
+        ev_pa = (
+            ev.select(["inning", "is_top_inning", "at_bat_index"]).unique()
+            .sort(["inning", "is_top_inning", "at_bat_index"])
+            .with_columns(pl.col("at_bat_index").rank("dense")
+                          .over(["inning", "is_top_inning"]).alias("pa_ordinal"))
         )
+        joined = ev.join(ev_pa.join(pa, on=["inning", "is_top_inning", "pa_ordinal"], how="left")
+                         .drop("pa_ordinal"),
+                         on=["inning", "is_top_inning", "at_bat_index"], how="left")
         base_dt = datetime.combine(self.game_date, datetime.min.time())
         for col in ("pa_first_pitch_time", "pa_last_pitch_time"):
             # HH:MM:SS text -> seconds-of-day -> datetime on the game date
@@ -116,13 +131,17 @@ class PBPClient:
     # ------------------------------------------------------------------
     def _query(self, sql: str) -> list[dict]:
         uri = f"file:{self.config.db_path}?mode=ro"
+        # ssh joins its argv with spaces and hands them to the remote shell:
+        # newlines in the SQL would be executed as shell commands, and any
+        # whitespace/quotes must be escaped for the REMOTE shell, hence shlex.
+        sql_flat = " ".join(sql.split())
+        remote = (f"sudo -n -u {shlex.quote(self.config.db_read_user)} "
+                  f"sqlite3 -json {shlex.quote(uri)} {shlex.quote(sql_flat)}")
         cmd = [
             "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-            f"{self.config.ssh_user}@{self.config.ssh_host}",
-            "sudo", "-n", "-u", self.config.db_read_user,
-            "sqlite3", "-json", uri, sql,
+            f"{self.config.ssh_user}@{self.config.ssh_host}", remote,
         ]
-        assert "mode=ro" in uri  # hard guard: this module never writes
+        assert "mode=ro" in remote  # hard guard: this module never writes
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if proc.returncode != 0:
             raise RuntimeError(f"DB query failed: {proc.stderr.strip()[:500]}")

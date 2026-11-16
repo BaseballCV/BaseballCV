@@ -27,6 +27,11 @@ class GameSyncConfig:
     refine_window_s: float = 5.0
     refine_step_s: float = 0.25
     min_margin_frac: float = 0.25      # winner must beat runner-up by this fraction
+    # interval-fit feasibility (full-game recording: first pitch near the start,
+    # last pitch near EOF). Measured 2026-11-12 feed: video starts 9 s before
+    # the DB first pitch and ends 102 s after the DB last pitch.
+    sync_pad_max_s: float = 1200.0     # max video lead-in before the DB first pitch
+    sync_pad_end_s: float = 1200.0     # max video tail after the DB last pitch
 
     # --- play windows (sync.py) ---
     pre_roll_s: float = 20.0
@@ -36,7 +41,10 @@ class GameSyncConfig:
     activity_fps: float = 5.0
     activity_downscale: float = 0.5
     activity_roi: tuple = (0.30, 0.30, 0.75, 0.85)  # infield box, frame fractions (x0,y0,x1,y1)
-    onset_min_strength: float = 2.5    # frame-diff energy over rolling median
+    activity_diff_thresh: float = 3.0    # gray levels: a pixel counts as "changed" above this
+    onset_floor_window_s: float = 20.0   # rolling-median floor; long so bursts don't lift it
+    onset_noise_mult: float = 3.0        # threshold = floor + max(mad*mult, floor_add)
+    onset_floor_add: float = 0.004       # absolute floor (fraction of ROI pixels)
     onset_sustain_s: float = 0.3
 
     # --- calibration (calibration.py) ---
