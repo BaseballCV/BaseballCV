@@ -2,5 +2,6 @@ from .distance_to_zone import DistanceToZone
 from .glove_tracker import GloveTracker
 from .command_analyzer import CommandAnalyzer
 from .steal_analysis import StealAnalyzer
+from .game_sync import GameSyncRunner
 
-__all__ = ['DistanceToZone', 'GloveTracker', 'CommandAnalyzer', 'StealAnalyzer']
+__all__ = ['DistanceToZone', 'GloveTracker', 'CommandAnalyzer', 'StealAnalyzer', 'GameSyncRunner']

@@ -34,6 +34,7 @@ polars = "^1.27.1"
 datasets = "^5.0.1"
 ultralytics = "^8.3.116"
 lapx = ">=0.5.11"  # required by ultralytics ByteTrack (steal analysis person tracking)
+rapidocr-onnxruntime = {version = ">=1.3", optional = true}  # game_sync burned-in clock OCR
 mediapipe = {version = "^1.1.1", optional = true}
 coco-eval = "0.0.4"
 pytorch-lightning = ">=2.6.4,<3"
@@ -46,6 +47,8 @@ supervision = "^0.29.0"
 [tool.poetry.extras]
 # DistanceToZone uses MediaPipe's Tasks API (PoseLandmarker). Opt in with `baseballcv[pose]`.
 pose = ["mediapipe"]
+# game_sync burned-in timestamp OCR. Opt in with `baseballcv[sync]`.
+sync = ["rapidocr-onnxruntime"]
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^9.0.3"

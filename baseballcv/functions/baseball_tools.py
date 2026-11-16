@@ -6,7 +6,7 @@ import shutil
 import os
 from typing import Dict, List, Optional # Added Optional
 import concurrent.futures
-from .utils import DistanceToZone, GloveTracker, CommandAnalyzer, StealAnalyzer, get_steal_events
+from .utils import DistanceToZone, GloveTracker, CommandAnalyzer, StealAnalyzer, GameSyncRunner, get_steal_events
 from baseballcv.utilities import BaseballCVLogger
 from baseballcv.functions.savant_scraper import BaseballSavVideoScraper
 
@@ -421,6 +421,32 @@ class BaseballTools:
                 return {"error": f"Error in scrape mode: {str(e)}"}
 
         return {"error": f"Unknown error processing in mode: {mode}"}
+
+    def sync_game_video(self,
+                        video_path: str,
+                        game_pk: int,
+                        cut_clips: bool = True,
+                        refresh_pbp: bool = False,
+                        results_dir: str = "results/game_sync",
+                        config=None) -> Dict:
+        """
+        Synchronize a full-game cenital (wide overhead) video with the LVBP
+        play-by-play database and cut one clip per play.
+
+        Reads the burned-in stadium timestamp to build the video<->wall-clock map,
+        validates the DB offset against motion activity, calibrates the bases
+        (venue priors + bright-blob detection + homography), and writes a
+        per-play manifest. The DB is read strictly read-only over ssh as the
+        DB owner user (WAL safety — see game_sync.pbp).
+
+        Returns:
+            Dict with ``offset_verdict`` (DB-vs-camera clock resolution),
+            ``sync_report``, ``clock_diagnostics``, ``calibration``,
+            ``windows`` (per-play video windows) and ``manifest`` (clips CSV).
+        """
+        runner = GameSyncRunner(device=self.device, config=config, results_dir=results_dir,
+                                logger=self.logger)
+        return runner.run(video_path, game_pk, cut_clips=cut_clips, refresh_pbp=refresh_pbp)
 
     def analyze_steals(self,
                        mode: str = "regular",
