@@ -323,17 +323,71 @@ first round conclusion (which blamed window misalignment):
    checks must tolerate/reject those, and a single-clock spot check is not
    proof of no drift.
 
-**Round conclusion (final): S6's failure is DETECTION, not windowing.** The
-runner is visible to the blob stack only inside ~20 ft of home; no clip in
-this game has a validated home->1B transit. The plan's DoD (>=80% coverage
-with real speed numbers) is unreachable with absdiff+median-bg on this 854x480
-compressed feed. Next round, in order:
-  a. Three-frame differencing (|f-f1| AND |f2-f1|, low threshold, corridor
-     ROI only) or signed (dark-blob-only) extraction — designed for 2-3 px
-     movers; flicker is mixed-sign/static, a dark-uniform runner is not.
-  b. If (a) still yields nothing on play_0042/play_0020/play_0033 raw windows,
-     declare the feed insufficient for runner speed metrics, keep the S8
-     delivery-timing observables (they work), and record the verdict in the
-     plan as the "park speed metrics" fallback — honestly.
-The flicker mask remains useful for crowd/stand junk (107->6 tracks prototype)
-but does not unlock the corridor.
+**Round conclusion (SUPERSEDED — see S6 v11 below): claimed S6's failure is
+DETECTION, not windowing.** Both halves of that claim were wrong: detection
+works full-game (73 validated transits) and the windowing failure was a
+CONSTANT ~+100 s db offset, not per-PA drift. Kept for the record; option (a)
+(three-frame differencing) was tried and is structurally broken — see v11.
+
+## S6 v11: full-game transit scan — detection works, the db clock is the (constant) culprit (latest)
+
+Three-frame differencing was tried first and is DEAD: (|f−f1|>T) & (|f−f2|>T)
+is EMPTY BY CONSTRUCTION for constant-velocity movers — the leading and
+trailing edge change-sets are disjoint frame sets, so the intersection is
+always empty regardless of threshold or morphology (synthetic control: 0/18
+detections on an 18-frame 2 px/frame mover, dilate included). Do not revisit.
+
+Then the pivot that closed the round: scan the WHOLE source video with the
+validated recipe (scripts/spike_s6_transit_scan.py: 600-frame median bg,
+absdiff > 14, morph open 3x3, area 5-300, corridor 5<fx<98 |fy|<12, then a
+chain finder 24->80 ft at 15-35 ft/s). 35 min wall for 13,138 s of video:
+
+- **562,331 corridor dets -> 73 transit chains** (run1/s6_transits.csv),
+  spanning 202 s to 13,107 s (all 9 innings), speeds 15.0-31.9 ft/s. The
+  runner blob IS detectable game-long; v10's "invisible past ~20 ft" was an
+  artifact of looking at windows that did not contain the plays.
+
+Joining transits to PA events (scripts/spike_s6_join_transits.py — must be a
+lag-windowed nearest match ~db+100 s, NOT an order-zip: 73 transits vs 103
+manifest rows (pitching subs, walks, strikeouts, caught flyouts have no
+full transit) makes order-zip slip ~+3000 s by inning 8):
+
+- **The lag transit_start − db_video_s is CONSTANT at +100 s (IQR 96-108)
+  from inning 1 through inning 9.** Examples: Flyout 1T db 98 -> 202.5
+  (+104); Single 2T db 1299 -> 1405.9 (+107); Profar's Single 5T db 6407 ->
+  6506.7 (+100, the transit verified visually two rounds ago); Single 8T db
+  9950 -> 10052.3 (+102). NOT drift — the "drift +80-100 s by inning 5"
+  framing and join v4's "+-15 s accuracy" were both measurement artifacts
+  (v4's DTW window silently excluded every PA whose true lag exceeded it).
+- **Root cause, pinned by the burned clock:** at three transit frames,
+  BurnedClockReader wall − db raw time = 5507 / 5500 / 5509 s — CONSTANT.
+  The db time-of-day runs ~91 min 45 s behind the burned stadium clock;
+  game_sync's DB_OFFSET = 5400 (the 90 min guess) is ~105 s short, and
+  CLOCK0 = 66764.0 is CONFIRMED (wall − video_s = 66764.1/66764.3 across
+  8,600 s — the burned clock is linear; the +3605 s hour-digit misread
+  recurred at video 6506.7 exactly as documented). Fix: DB_OFFSET ≈ 5505,
+  or fit it per game (burned-clock-vs-db on a few events).
+- ERRATA on the v10 postmortem above: (1) the re-cut play_0042 window does
+  NOT contain its play — the single transits at 6506.7, ~53 s past the clip
+  end (6452); the "+33 s db lag" and "real delivery ~6440" reads were
+  misidentifications (contact is ~6504 = db 6407 + 97), and the static blob
+  at (79,62) from f1516 was not the fielded ball. (2) play_0020's real PA
+  transit exists at video 1405.9 (db 1299 + 107, 21.3 ft/s) — the v10
+  "near-pass" chain artifact remains retracted, but the play itself was
+  never in the 2766-2826 clip. The chain-artifact retraction of v8/v9/v10
+  "passes" STANDS — those tracks hop quasi-static on-deck/coach blobs and
+  are not transits; the real transits live ~100 s after each db time.
+
+Coverage: 73 transits vs ~88-92 expected batter-runner PAs — the deficit is
+honest misses (jogged walks, caught-flyout partials, sub-15 ft/s legs, plus
+a few chain-split dedupes), to be quantified per event type next round.
+
+Next round, in order:
+  a. Refit the db offset (~+5505 or per-game fit), re-cut the singles, and
+     re-run the v10 gate — expect near-total pass where the transit scan
+     found the play; THEN wire transit windows (not db windows) into
+     game_metrics as the clip-selection path.
+  b. Per-event-type coverage table (which PAs yield transits; speed stats
+     vs expectation); per-event time_to_1b from transit chains.
+  c. S7 defenders on corrected windows (its spike never ran — the window
+     bug would have poisoned it too).
