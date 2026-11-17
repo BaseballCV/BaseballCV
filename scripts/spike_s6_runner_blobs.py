@@ -35,10 +35,11 @@ def main():
     cfg = MetricsConfig()
     cfg = MetricsConfig()
     manifest = pl.read_csv(os.path.join(RUN_DIR, "manifest.csv"))
-    gbs = manifest.filter(
-        (pl.col("event_text") == "Groundout") & (pl.col("base_state_before") == 0)
-    ).head(10)
-    print(f"{len(gbs)} groundout clips, empty base state")
+    event = sys.argv[1] if len(sys.argv) > 1 else "Groundout"
+    gbs = manifest.filter(pl.col("event_text") == event).head(10).unique(
+        subset=["video_start_s"]
+    )
+    print(f"{len(gbs)} {event} clips")
     gate = []
     for row in gbs.iter_rows(named=True):
         path = row["clip_path"]

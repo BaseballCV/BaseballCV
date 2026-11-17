@@ -95,14 +95,16 @@ for r in runs:
         merged[-1][1] = r[1]
     else:
         merged.append(r)
-# keep plausible deliveries
+# keep runs with at least MIN_RUN frames of motion; length filtering moved
+# downstream (a long run can be delivery+contact chained — its START is still
+# the delivery instant), the discriminator uses run length as a feature
 kept = []
 for s, e in merged:
     ln = e - s + 1
-    if MIN_RUN <= ln <= MAX_RUN:
+    if ln >= MIN_RUN:
         seg = energies[s:e + 1]
         kept.append((s, e, float(s + e) / 2.0, float(seg.max())))
-print(f"{len(merged)} runs -> {len(kept)} plausible deliveries")
+print(f"{len(merged)} runs -> {len(kept)} candidate runs (>= {MIN_RUN} frames)")
 
 with open(OUT_CSV, "w", newline="") as fh:
     w = csv.writer(fh)
@@ -113,9 +115,11 @@ with open(OUT_CSV, "w", newline="") as fh:
 if kept:
     arr = np.array([(s, e, c, pk) for s, e, c, pk in kept])
     np.savez(OUT_NPZ, start_f=arr[:, 0], end_f=arr[:, 1],
-             center_f=arr[:, 2], peak_e=arr[:, 3])
+             center_f=arr[:, 2], peak_e=arr[:, 3],
+             energies=energies, n_frames=n)
 else:
     np.savez(OUT_NPZ, start_f=np.zeros(0), end_f=np.zeros(0),
-             center_f=np.zeros(0), peak_e=np.zeros(0))
+             center_f=np.zeros(0), peak_e=np.zeros(0),
+             energies=energies, n_frames=n)
 print(f"wrote {OUT_NPZ} and {OUT_CSV}")
 print("first 20 centers (s):", [f"{c / FPS:.1f}" for _, _, c, _ in kept[:20]])

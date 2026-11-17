@@ -235,16 +235,42 @@ What was proven and what broke:
   run1/diag{2,3}/.
 
 Next round, in order (each gates the next):
-1. Delivery-vs-noise discriminator for mound bursts (pitcher blob present at the mound
-   circle before, motion burst, pitcher still there after; pickoffs/warmups/fielding
-   runs fail at least one test). THEN re-run the joiners: greedy, per-PA segment
-   (constant-lag), and global monotone DTW all exist in scripts/spike_s8_join.py's git
-   history; decide the lag model on clean bursts only.
-2. With adjudicated per-pitch video instants: verify each S6 clip actually contains its
-   play (later-inning clips still suspect via the PA-join collapse), re-run the S6 spike.
-   Also examine whether mid-line detection needs a lower contrast threshold or
-   per-region gain before trusting more clips (play_0005 lesson: nulls may be
-   detection losses, not absent runs — a hand-tracked negative control would settle it).
+1. ~~Delivery-vs-noise discriminator~~ DONE (see next section) — the lag model it
+   supports: DB pitch times accurate to +-10-15 s, joiner v4 is the reference.
+2. Per-clip play-window verification (each S6 clip: delivery burst + play signature
+   near the db-derived instant) before trusting its row — later-inning clips still
+   suspect via the PA-join collapse; then attack track fragmentation (occlusion
+   gap interpolation inside selection, not just inside tracks).
 3. Only then the 103-clip run + DoD (honest statuses: sprint rows where the runner is
    extractable, nulls elsewhere); S7 defenders behind its own spike as planned.
+
+## S8 discriminator + S6 v9 on singles (same day, later)
+
+Discriminator shipped (scripts/spike_s8_discriminate.py): a delivery = run with a
+QUIET mound before it (pre-window mean count-energy < 2 over the 1.3 s before the
+run); delivery+contact chains keep the run START + windup midpoint as the instant
+(MAX_RUN was wrongly discarding those — play_0003's clock-verified delivery was
+one). 684/1583 runs pass. Joiner v4 (spike_s8_join_v4.py, monotone DTW, +-15 s):
+123/326 pitches matched, lag p5-p95 = -11.5..+10.9 s, median 0.4 s; the
+clock-verified play_0005 anchor lands at +0.2 s. The 62% unmatched are detector
+misses (weak windups), not model failures.
+
+**Working conclusion: DB pitch times are accurate to roughly +-10-15 s** — plenty
+for 50-100 s clips; the "mush" framing is dead. The remaining alignment risk is
+NOT timing but the PA-join collapse for late-inning clip windows (unchanged).
+
+S6 v9 on the 10 Single clips (spike now takes the event as argv): GATE 1/10.
+- play_0013 PASSES (peak 24.3 ft/s, arrival 2.8 ft, frac 0.97).
+- play_0012: genuine transit (t2_1b 2.9 s, arrival 2.8 ft) but the track
+  fragments through occlusions (frac 0.35 vs required 0.8) — a track-continuity
+  problem, not detection. (2.9 s home->1B is suspiciously fast for the plan's
+  3.8-5.5 s expectation; treat the number as unverified until eyeballed.)
+- 5/10 honest nulls (cands=[]), 3 FAIL with no-arrival long tracks. Singles MUST
+  contain a hard run, so nulls on singles are either late-inning clip-window
+  misalignment (0049 inn5B, 0065 inn7B, 0042 inn5T are in the suspect zone) or
+  detection loss — each clip needs its play window verified before blame.
+- play_0005 postmortem closed: at threshold 7 px / min-area 4 there are STILL no
+  mid-line detections; the batter-runner jogged (~4-5 ft/s blob 15->23 ft) and
+  the (98,11) motion at f1410+ is the 1B fielder taking the throw. Routine
+  groundouts are honest nulls; singles/triples are the right S6 test set.
 
