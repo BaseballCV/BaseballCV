@@ -201,14 +201,26 @@ What was proven and what broke:
   min_d_1b 1.8 ft, 87% frames). The stack (median bg -> absdiff -> greedy NN with
   tight dt=1 gate 4 px / wide 14 px only for gaps -> onset-based selection) is sound
   when the run is inside the clip.
-- **The blocker is UPSTREAM: DB pitch times are scorekeeper mush.** Measured lags
-  PBP->video on play_0003/0005/0017: ~21 s, ~33 s, ~97 s (varying per PA!), and the
-  PA<->pitches ordinal join looks broken for later innings (at_bats 41/45/47 all map
-  within 10 s of each other). resolve_offset only searches whole-minute candidates
-  scored by coarse activity matching, so a constant 30 s logging lag inside the right
-  minute is invisible; margin 1.0 certifies the MINUTE, not the second. Clips are cut
-  around the wrong instants, so several groundout clips plausibly do not contain their
-  run at all. The 103-clip full run is NOT worth doing before this is fixed.
+- **CORRECTED SAME DAY (S8 spike, do not trust the "mush" claim below): the DB-pitch-time
+  mush finding did not survive re-examination.** The "lags 21/33/97 s" were mispairings:
+  a mound-delivery burst of one pitch scored against another pitch's db time. Full-source
+  mound-burst scan (scripts/spike_s8_delivery_scan.py, 1486 raw bursts / 704 after 1.5 s
+  merge over 13138 s, ~469 fps) + three joiners (greedy / per-PA segment / global monotone
+  DTW in scripts/spike_s8_join.py) give CONTRADICTING evidence: some matches land at
+  lag ~0 (DTW med 0.5 s on 124 pitches, |lag|<=15 on 90%), others alias to +-35 s — with
+  ~2x more bursts than pitches and ~18 s median burst spacing, every pitch has several
+  candidates inside +-20 s and burst timing alone cannot adjudicate. Burned-clock anchors
+  remain exact: play_0005 clip f0 = 18:43:14, pitch no.20 db wall = clip f1320 dead on.
+  Early-inning spike clips DO contain their plays; later-inning clips are still suspect
+  via the PA-join collapse (that finding stands: at_bats 41/45/47 map within 10 s of
+  each other). Alignment status: UNRESOLVED, needs a delivery-vs-noise discriminator
+  (e.g., pitcher-present-then-motion) before any joiner is trustworthy.
+- **play_0005's S6 failure is DETECTION-level, not alignment.** The play is in-clip at
+  f1320-1364 (clock-verified), yet extract_blobs yields ZERO detections between 25 and
+  98 ft on the 1B line for the whole clip (raw dets + farx + ghost diffs + eye all agree;
+  dets at (99,11)/(98,-6) appear only at f1555+). Whether the batter jogged (G-13 easy
+  groundout, ~10 s transit plausible) or detection dies mid-line, this clip's run is not
+  extractable at blob level and the honest row is a null. The S6 nulls are honest nulls.
 - **Geometry fact: below ~20 ft from home the batter is 2-3 px (0.72 px/ft) and merged
   into the plate pile blob — no onset is observable there** (play_0005 forensics: raw
   detections never move past 25-27 ft; the runner emerges as a solid 20-60 px blob at
@@ -223,12 +235,16 @@ What was proven and what broke:
   run1/diag{2,3}/.
 
 Next round, in order (each gates the next):
-1. Fix per-PA alignment in game_sync: fine offset refinement (scan +-60 s at 1 s around
-   the coarse offset) scored NOT by frame-diff energy (measured: flat, motion is too
-   continuous) but by clip-local video signatures — mound-delivery bursts for pitches,
-   plate-cluster churn for swings. Or bypass PBP inside game_metrics: locate the play
-   per clip from video evidence and use OCR clock anchors (they ARE drift-free) for
-   wall time; keep contact_db_pitch_s as an explicitly coarse cross-check.
-2. Re-cut clips or re-map play windows, then re-run the S6 spike on fresh clips.
-3. Only then the 103-clip run + DoD; S7 defenders behind its own spike as planned.
+1. Delivery-vs-noise discriminator for mound bursts (pitcher blob present at the mound
+   circle before, motion burst, pitcher still there after; pickoffs/warmups/fielding
+   runs fail at least one test). THEN re-run the joiners: greedy, per-PA segment
+   (constant-lag), and global monotone DTW all exist in scripts/spike_s8_join.py's git
+   history; decide the lag model on clean bursts only.
+2. With adjudicated per-pitch video instants: verify each S6 clip actually contains its
+   play (later-inning clips still suspect via the PA-join collapse), re-run the S6 spike.
+   Also examine whether mid-line detection needs a lower contrast threshold or
+   per-region gain before trusting more clips (play_0005 lesson: nulls may be
+   detection losses, not absent runs — a hand-tracked negative control would settle it).
+3. Only then the 103-clip run + DoD (honest statuses: sprint rows where the runner is
+   extractable, nulls elsewhere); S7 defenders behind its own spike as planned.
 
