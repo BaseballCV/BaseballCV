@@ -34,3 +34,9 @@ events.out.tfevents.*
 *.pt
 *.pth
 *.task
+# Local spike/diagnostic scratch (never commit)
+run1/
+runs/
+test.log
+excalidraw.log
+team_lab_numbers_2026-10-25.pdf
