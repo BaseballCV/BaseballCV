@@ -186,3 +186,49 @@ hopeless at 5-10 px).
 - CI "Test model" asserts the `base_detector` class names are `{0: "base", 1: "distractor"}`.
 - Windows quirks seen here: the heredoc-with-python pattern can fail in the Bash tool when the text contains
   apostrophes; use the file Write tool for source files.
+
+## Game metrics from the cenital feed (feat/game-metrics, spike 2026-11-16)
+
+Package `baseballcv/functions/utils/baseball_utils/game_metrics/` (config/tracking/
+metrics/defense/runner + BaseballTools.compute_game_metrics wrapper, 29 synthetic-clip
+tests green; game_sync untouched at 31). Step-0 persistence (calibration.npz,
+sync_state.json, Homography.field_to_image/from_matrix) committed in 5026b1b.
+
+**S6 runner-blob spike: GATE 1/7 (plan wanted >=7/10). Do not treat the gate as met.**
+What was proven and what broke:
+
+- PLAY_0003 PASSES END-TO-END: real home->1B run tracked (peak 25.5 ft/s, arrival
+  min_d_1b 1.8 ft, 87% frames). The stack (median bg -> absdiff -> greedy NN with
+  tight dt=1 gate 4 px / wide 14 px only for gaps -> onset-based selection) is sound
+  when the run is inside the clip.
+- **The blocker is UPSTREAM: DB pitch times are scorekeeper mush.** Measured lags
+  PBP->video on play_0003/0005/0017: ~21 s, ~33 s, ~97 s (varying per PA!), and the
+  PA<->pitches ordinal join looks broken for later innings (at_bats 41/45/47 all map
+  within 10 s of each other). resolve_offset only searches whole-minute candidates
+  scored by coarse activity matching, so a constant 30 s logging lag inside the right
+  minute is invisible; margin 1.0 certifies the MINUTE, not the second. Clips are cut
+  around the wrong instants, so several groundout clips plausibly do not contain their
+  run at all. The 103-clip full run is NOT worth doing before this is fixed.
+- **Geometry fact: below ~20 ft from home the batter is 2-3 px (0.72 px/ft) and merged
+  into the plate pile blob — no onset is observable there** (play_0005 forensics: raw
+  detections never move past 25-27 ft; the runner emerges as a solid 20-60 px blob at
+  18-26 ft). select_runner_track's onset corridor is now 20-40 ft (v7 used 5-30, v6
+  and earlier raw-velocity noise). With 20-40 ft the false candidates vanish (4 clips
+  honestly report "no runner" instead of selecting a wrong full-clip chain).
+- Forensics tooling (throwaway, keep for the next round): scripts/diag_s6_tracks.py
+  (per-track best smoothed vx + corridor frac + annotated frames), diag_s6_rawdets.py
+  (raw corridor dets over a frame range), diag_s6_farx.py (whole-clip scan for anyone
+  past 30 ft), diag_s6_frame_dets.py (per-frame px<->field det dump + diff maps),
+  diag_s6_clip.py (annotated PNGs). Logs in run1/s6_spike*.log, diag sheets in
+  run1/diag{2,3}/.
+
+Next round, in order (each gates the next):
+1. Fix per-PA alignment in game_sync: fine offset refinement (scan +-60 s at 1 s around
+   the coarse offset) scored NOT by frame-diff energy (measured: flat, motion is too
+   continuous) but by clip-local video signatures — mound-delivery bursts for pitches,
+   plate-cluster churn for swings. Or bypass PBP inside game_metrics: locate the play
+   per clip from video evidence and use OCR clock anchors (they ARE drift-free) for
+   wall time; keep contact_db_pitch_s as an explicitly coarse cross-check.
+2. Re-cut clips or re-map play windows, then re-run the S6 spike on fresh clips.
+3. Only then the 103-clip run + DoD; S7 defenders behind its own spike as planned.
+

@@ -6,7 +6,7 @@ import shutil
 import os
 from typing import Dict, List, Optional # Added Optional
 import concurrent.futures
-from .utils import DistanceToZone, GloveTracker, CommandAnalyzer, StealAnalyzer, GameSyncRunner, get_steal_events
+from .utils import DistanceToZone, GloveTracker, CommandAnalyzer, StealAnalyzer, GameSyncRunner, GameMetricsRunner, get_steal_events
 from baseballcv.utilities import BaseballCVLogger
 from baseballcv.functions.savant_scraper import BaseballSavVideoScraper
 
@@ -447,6 +447,29 @@ class BaseballTools:
         runner = GameSyncRunner(device=self.device, config=config, results_dir=results_dir,
                                 logger=self.logger)
         return runner.run(video_path, game_pk, cut_clips=cut_clips, refresh_pbp=refresh_pbp)
+
+    def compute_game_metrics(self,
+                             sync_results_dir: str = "run1/game_sync",
+                             results_dir: str = "results/game_metrics",
+                             defense: bool = False,
+                             config=None) -> Dict:
+        """
+        Runner (and optionally defender) metrics from synced per-play clips.
+
+        Consumes an existing sync run's artifacts (manifest.csv,
+        calibration.npz, sync_state.json, clock_anchors.npz in
+        ``sync_results_dir``) — run :meth:`sync_game_video` first. Tracks the
+        batter-runner as a blob on each clip, measures bolt timing, time to
+        1B, peak speed and speed checkpoints, and writes game_metrics.csv.
+
+        Returns:
+            Dict with ``summary`` (counts, csv path), ``rows`` (flat dicts) and
+            ``metrics`` (polars DataFrame).
+        """
+        runner = GameMetricsRunner(sync_results_dir=sync_results_dir,
+                                   results_dir=results_dir, config=config,
+                                   logger=self.logger, device=self.device)
+        return runner.run(defense=defense)
 
     def analyze_steals(self,
                        mode: str = "regular",
