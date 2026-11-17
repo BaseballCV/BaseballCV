@@ -274,3 +274,40 @@ S6 v9 on the 10 Single clips (spike now takes the event as argv): GATE 1/10.
   the (98,11) motion at f1410+ is the 1B fielder taking the throw. Routine
   groundouts are honest nulls; singles/triples are the right S6 test set.
 
+
+## S6 v10: re-cut clips + the play_0042 space-time verdict (same day, latest)
+
+Window-margin fix shipped first (scripts/recut_s6_clips.py): re-cut singles from
+the source video around the RESULT pitch of the PA (matched by batter name),
+15 s before / 45 s after, re-encoded frame-exact. play_0033's proof the fix was
+needed: the single (#121, H1B) sits at video_s 4936; the manifest clip ends at
+4939 — the whole transit was cut off. Three PAs with mojibake-variant batter
+names do not match ('Jose Cordova', 'Carlos RodrÃ­guez', 'Jhostynxon Garcia') —
+name normalization still owed.
+
+v10 (scripts/spike_s6_v10.py, same package path + gate) on the re-cut clips:
+GATE 0/10, but 7/10 produce corridor-track candidates and play_0020 is a
+near-pass (onset 27.1 ft, min_d_1b 3.8 ft vs margin 3.0, peak 28.24 ft/s,
+frac 0.62). When a window actually contains its play, the whole stack
+(track -> selection -> metrics) works end to end.
+
+play_0042 postmortem (the deepest of the round): a space-time slab sampled
+along the 1B line (field 10..95 ft, 3x3 max diff) across the FULL 60 s re-cut
+clip shows zero diagonal streaks — no transit at any frame, though the batter
+leaves the box (det at 9,4 ft, f360) and the fielder fields mid-infield
+(dets f390-410). The chalk line itself is chronically above diff-14: 10-50 of
+171 path samples per second, all vertical (static flicker) streaks. Two
+caveats measured along the way: threshold 10 is below the global noise floor
+(34.7k px/frame raw >10 — bg drift), so "just lower the threshold" is not a
+fix; and the flicker-mask prototype leaves THIS clip's transit band clean, so
+masking alone doesn't unlock it either.
+
+**Round conclusion: the dominant remaining S6 failure is per-clip window
+misalignment, not detection.** DB pitch times are +-10-15 s at best and some
+PA joins collapse entirely (play_0065's matched delivery 2228 s off its
+window). A 7/10 gate is unreachable while windows derive from db times. Next
+round: derive each play window from VIDEO-native delivery instants (the S8
+burst scan + per-PA join + clock anchors) instead of db pitch times, then
+re-run v10 unchanged. If that still can't clear 7/10, the honest fallback is
+sparse coverage with the status column (a play_0020-quality measurement on
+the plays that lock is already real, publishable data).
