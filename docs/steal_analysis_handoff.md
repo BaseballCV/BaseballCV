@@ -291,23 +291,49 @@ near-pass (onset 27.1 ft, min_d_1b 3.8 ft vs margin 3.0, peak 28.24 ft/s,
 frac 0.62). When a window actually contains its play, the whole stack
 (track -> selection -> metrics) works end to end.
 
-play_0042 postmortem (the deepest of the round): a space-time slab sampled
-along the 1B line (field 10..95 ft, 3x3 max diff) across the FULL 60 s re-cut
-clip shows zero diagonal streaks — no transit at any frame, though the batter
-leaves the box (det at 9,4 ft, f360) and the fielder fields mid-infield
-(dets f390-410). The chalk line itself is chronically above diff-14: 10-50 of
-171 path samples per second, all vertical (static flicker) streaks. Two
-caveats measured along the way: threshold 10 is below the global noise floor
-(34.7k px/frame raw >10 — bg drift), so "just lower the threshold" is not a
-fix; and the flicker-mask prototype leaves THIS clip's transit band clean, so
-masking alone doesn't unlock it either.
+play_0042 postmortem — the deepest of the round, and it OVERTURNED the
+first round conclusion (which blamed window misalignment):
 
-**Round conclusion: the dominant remaining S6 failure is per-clip window
-misalignment, not detection.** DB pitch times are +-10-15 s at best and some
-PA joins collapse entirely (play_0065's matched delivery 2228 s off its
-window). A 7/10 gate is unreachable while windows derive from db times. Next
-round: derive each play window from VIDEO-native delivery instants (the S8
-burst scan + per-PA join + clock anchors) instead of db pitch times, then
-re-run v10 unchanged. If that still can't clear 7/10, the honest fallback is
-sparse coverage with the status column (a play_0020-quality measurement on
-the plays that lock is already real, publishable data).
+1. The re-cut window DOES contain its play. Two clean delivery bursts sit in
+   the clip (video 6408.0 and 6440.4/6441.2); pitch #155's db time is 6407,
+   but track + ball evidence puts the real delivery at ~6440: a track chains
+   from the plate cluster into a STATIC blob at field (79,62) from f1516
+   (the batted ball / fielded CF single resting), i.e. contact ~f1445 =
+   video 6440.5. **DB lag for THIS PA is +33 s, not the +-15 s from join v4**
+   — that figure was computed over MATCHED pitches only; unmatched PAs can be
+   far worse. A source-video corridor scan (video 6300-6560, gapless) found
+   no transit anywhere, so db times cannot be trusted per-PA at all.
+2. Even in the verified window (delivery f1440, ball fielded by f1516), a
+   gapless 3x3-morphology scan over the wide band (20<fx<98, |fy|<25..40,
+   area 4-300, step 2, f1444-1700) finds NO runner dets, and 5x raw-pixel
+   corridor zooms f1470-1512 show an EMPTY basepath by eye. The batter-runner
+   is simply invisible past ~20 ft in this clip.
+3. **play_0020's v10 near-pass is a CHAIN ARTIFACT.** Track 43 sits at
+   5-13 ft with stationary 20-frame runs punctuated by 30-130 ft/s teleports
+   between quasi-static plate-area dets — not a coherent transit. Given that,
+   every earlier "pass" (v9 play_0013 frac 0.97, v8 play_0003 peak 25.5) is
+   presumed chains too. The chain backbone: quasi-static on-deck/coach blobs
+   at field (13-21, 5-11) and (98-100, 11-15), present in every clip, joined
+   by associate_blobs' unlimited-gap 14 px gate.
+4. Methodology gotcha worth keeping: manual spike scans must use the package's
+   morph_open_px=3 — a 5x5 open erodes the 3-4 px runner blob to nothing and
+   silently produces "no transit" (this burned the first half of the dig).
+   Also: BurnedClockReader returns +1 h misreads sporadically (hour-digit
+   confusion, drift alternates +5 s / +3605 s on neighboring samples) — anchor
+   checks must tolerate/reject those, and a single-clock spot check is not
+   proof of no drift.
+
+**Round conclusion (final): S6's failure is DETECTION, not windowing.** The
+runner is visible to the blob stack only inside ~20 ft of home; no clip in
+this game has a validated home->1B transit. The plan's DoD (>=80% coverage
+with real speed numbers) is unreachable with absdiff+median-bg on this 854x480
+compressed feed. Next round, in order:
+  a. Three-frame differencing (|f-f1| AND |f2-f1|, low threshold, corridor
+     ROI only) or signed (dark-blob-only) extraction — designed for 2-3 px
+     movers; flicker is mixed-sign/static, a dark-uniform runner is not.
+  b. If (a) still yields nothing on play_0042/play_0020/play_0033 raw windows,
+     declare the feed insufficient for runner speed metrics, keep the S8
+     delivery-timing observables (they work), and record the verdict in the
+     plan as the "park speed metrics" fallback — honestly.
+The flicker mask remains useful for crowd/stand junk (107->6 tracks prototype)
+but does not unlock the corridor.
